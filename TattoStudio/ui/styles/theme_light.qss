@@ -72,3 +72,62 @@ QTabBar::tab {
     padding: 6px 12px; margin-right: 4px; border-top-left-radius: 8px; border-top-right-radius: 8px;
 }
 QTabBar::tab:selected { background: #fff; border-color: #e5e7eb; }
+
+QFrame#Card { background: palette(base); border: 1px solid #e5e7eb; border-radius: 10px; }
+
+QFrame#Card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 0px;
+  background: palette(base);
+}
+
+/* Cards reusables */
+QFrame#Card { border: 1px solid #e5e7eb; border-radius: 10px; background: palette(base); }
+QLabel#BadgeRole { background:#eef2ff; color:#3730a3; border-radius:8px; padding:2px 6px; }
+QLabel#BadgeState { background:#f1f5f9; color:#0f172a; border-radius:8px; padding:2px 6px; }
+
+/* Chips reutilizables */
+QPushButton#Chip {
+  background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px;
+  padding: 6px 12px; color: #111;
+}
+QPushButton#Chip:hover { background: #e5e7eb; }
+QPushButton#Chip:checked { background: #111; color: #fff; border-color: #111; }
+
+/* Tarjetas */
+QFrame#Card { background: palette(base); border: 1px solid #e5e7eb; border-radius: 12px; }
+
+/* KPI cards */
+QFrame#CardKPI {
+  background: palette(base);
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+}
+
+/* Cards genéricas (si no las tenías) */
+QFrame#Card {
+  background: palette(base);
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+}
+
+/* Chips ya los usamos en Reports; por si acaso: */
+QPushButton#Chip {
+  background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px;
+  padding: 6px 12px; color: #111;
+}
+QPushButton#Chip:hover { background: #e5e7eb; }
+QPushButton#Chip:checked { background: #111; color: #fff; border-color: #111; }
+
+/* Sidebar */
+QFrame#Sidebar {
+  background: palette(base);
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+}
+
+/* Chips de agenda (Day/Week) se colorean inline, aquí solo padding/bordes) */
+QFrame#ChipAppt {
+  border-radius: 6px;
+}
