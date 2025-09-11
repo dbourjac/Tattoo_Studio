@@ -1,39 +1,59 @@
-from PyQt5.QtCore import Qt, QDate
+# ui/pages/new_client.py
+from PyQt5.QtCore import Qt, QDate, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QTabWidget, QGroupBox, QFormLayout,
     QLineEdit, QDateEdit, QComboBox, QCheckBox, QTextEdit, QListWidget,
     QListWidgetItem, QHBoxLayout, QPushButton
 )
 
-
 class NewClientPage(QWidget):
     """
     Formulario (mock) de Nuevo Cliente:
-    - Solo UI, sin guardado real.
+    - UI únicamente (sin guardado real).
     - Tabs: Identificación & Contacto / Preferencias / Salud / Consentimientos / Emergencia / Notas & Archivos
-    - Botones al pie: Guardar / Guardar y agendar / Cancelar (sin lógica)
+    - Botones al pie: Guardar / Guardar y agendar / Cancelar
+    Cambios:
+      * Eliminado WhatsApp (campo + checkbox) y reemplazado por Instagram
+      * Botón '← Volver' que emite la señal 'volver_atras'
     """
+    # Señal para que MainWindow navegue hacia atrás
+    volver_atras = pyqtSignal()
+
     def __init__(self):
         super().__init__()
 
+        # Asegura que todos los QLabel se vean sin recuadro de fondo
+        self.setStyleSheet("QLabel { background: transparent; }")
+
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 24, 24, 16)
+        root.setContentsMargins(24, 24, 16, 16)
         root.setSpacing(12)
+
+        # ---- Barra superior: Volver + Título ----
+        top = QHBoxLayout(); top.setSpacing(8)
+        self.btn_back = QPushButton("← Volver")
+        self.btn_back.setObjectName("GhostSmall")
+        self.btn_back.setMinimumHeight(32)
+        self.btn_back.clicked.connect(self.volver_atras.emit)
+        top.addWidget(self.btn_back)
+        top.addStretch(1)
+        root.addLayout(top)
 
         title = QLabel("Nuevo cliente")
         title.setObjectName("H1")
         root.addWidget(title)
 
+        # ---- Tabs ----
         tabs = QTabWidget()
-        tabs.addTab(self._tab_identificacion_contacto(), "Identificación & Contacto")
+        tabs.addTab(self._tab_identificacion_contacto(), "Identificación")
         tabs.addTab(self._tab_preferencias(), "Preferencias")
         tabs.addTab(self._tab_salud(), "Salud")
         tabs.addTab(self._tab_consentimientos(), "Consentimientos")
         tabs.addTab(self._tab_emergencia(), "Emergencia")
-        tabs.addTab(self._tab_notas_archivos(), "Notas & Archivos")
+        tabs.addTab(self._tab_notas_archivos(), "Notas")
         root.addWidget(tabs, stretch=1)
 
-        # Barra de botones
+        # ---- Barra de botones (footer) ----
         btn_bar = QHBoxLayout()
         btn_bar.addStretch(1)
         self.btn_guardar = QPushButton("Guardar"); self.btn_guardar.setObjectName("CTA")
@@ -52,7 +72,7 @@ class NewClientPage(QWidget):
         w = QWidget()
         lay = QVBoxLayout(w); lay.setSpacing(12)
 
-        # Identificación
+        # ----- Identificación -----
         box_id = QGroupBox("Identificación")
         form_id = QFormLayout(box_id); form_id.setLabelAlignment(Qt.AlignRight)
         self.in_nombres = QLineEdit();      self.in_nombres.setPlaceholderText("Nombre(s) *")
@@ -60,7 +80,15 @@ class NewClientPage(QWidget):
         self.in_ap2 = QLineEdit();          self.in_ap2.setPlaceholderText("Segundo apellido (opcional)")
         self.in_fnac = QDateEdit();         self.in_fnac.setCalendarPopup(True)
         self.in_fnac.setDisplayFormat("dd/MM/yyyy"); self.in_fnac.setDate(QDate.currentDate().addYears(-18))
-        self.cb_genero = QComboBox();       self.cb_genero.addItems(["No especifica", "Femenino", "Masculino"])
+        self.cb_genero = QComboBox()
+        self.cb_genero.addItems([
+            "Femenino", "Masculino", "Prefiero no decir",
+            "No binario", "Agénero", "Género fluido",
+            "No conforme con el género", "Queer", "Maverique",
+            "Transfemenino", "Transmasculino", "Hombre trans", "Mujer trans",
+            "Intergénero", "Poligénero",
+            "En exploración", "Es una larga historia", "Depende del día",
+            "Sorpréndeme"])
 
         form_id.addRow("Nombre(s):", self.in_nombres)
         form_id.addRow("Primer apellido:", self.in_ap1)
@@ -68,21 +96,18 @@ class NewClientPage(QWidget):
         form_id.addRow("Fecha de nacimiento:", self.in_fnac)
         form_id.addRow("Género:", self.cb_genero)
 
-        # Contacto
+        # ----- Contacto -----
         box_ct = QGroupBox("Contacto")
         form_ct = QFormLayout(box_ct); form_ct.setLabelAlignment(Qt.AlignRight)
-        self.in_tel = QLineEdit();      self.in_tel.setPlaceholderText("Teléfono principal *")
-        self.in_wa = QLineEdit();       self.in_wa.setPlaceholderText("WhatsApp (opcional)")
-        self.in_mail = QLineEdit();     self.in_mail.setPlaceholderText("Correo (opcional)")
-        self.in_ciudad = QLineEdit();   self.in_ciudad.setPlaceholderText("Ciudad (opcional)")
-        self.in_estado = QLineEdit();   self.in_estado.setPlaceholderText("Estado (opcional)")
+        self.in_tel = QLineEdit();    self.in_tel.setPlaceholderText("Teléfono principal *")
+        self.in_ig = QLineEdit();     self.in_ig.setPlaceholderText("Instagram (opcional)")
+        self.in_mail = QLineEdit();   self.in_mail.setPlaceholderText("Correo (opcional)")
+        self.in_ciudad = QLineEdit(); self.in_ciudad.setPlaceholderText("Ciudad (opcional)")
+        self.in_estado = QLineEdit(); self.in_estado.setPlaceholderText("Estado (opcional)")
 
-        self.chk_wa_igual = QCheckBox("WhatsApp igual al teléfono")
-        self.chk_wa_igual.stateChanged.connect(self._sync_whatsapp)
-
+        # (Se eliminó el checkbox 'WhatsApp igual al teléfono' y el campo WhatsApp)
         form_ct.addRow("Teléfono:", self.in_tel)
-        form_ct.addRow("", self.chk_wa_igual)
-        form_ct.addRow("WhatsApp:", self.in_wa)
+        form_ct.addRow("Instagram:", self.in_ig)
         form_ct.addRow("Correo:", self.in_mail)
         form_ct.addRow("Ciudad:", self.in_ciudad)
         form_ct.addRow("Estado:", self.in_estado)
@@ -98,24 +123,23 @@ class NewClientPage(QWidget):
 
         box_pref = QGroupBox("Preferencias del cliente")
         form_p = QFormLayout(box_pref); form_p.setLabelAlignment(Qt.AlignRight)
-        self.cb_artista = QComboBox(); self.cb_artista.addItems(["(Sin preferencia)", "Dylan", "Saúl", "Mariana"])
+        self.cb_artista = QComboBox(); self.cb_artista.addItems(["Sin preferencia", "Dylan", "Jesús", "Pablo", "Alex"])
+
         self.lst_estilos = QListWidget(); self.lst_estilos.setSelectionMode(QListWidget.MultiSelection)
-        for estilo in ["Línea fina", "Realismo", "Tradicional", "Acuarela", "Geométrico", "Blackwork"]:
+        for estilo in ["Línea fina", "Realismo", "Tradicional", "Acuarela", "Geométrico", "Blackwork", "Anime"]:
             QListWidgetItem(estilo, self.lst_estilos)
+
         self.lst_zonas = QListWidget(); self.lst_zonas.setSelectionMode(QListWidget.MultiSelection)
         for zona in ["Brazo", "Antebrazo", "Pierna", "Espalda", "Pecho", "Muñeca", "Tobillo"]:
             QListWidgetItem(zona, self.lst_zonas)
 
-        self.cb_origen = QComboBox(); self.cb_origen.addItems(["Instagram", "TikTok", "Google", "Referido", "Walk-in", "Otro"])
-        self.chk_recordatorios = QCheckBox("Acepta recibir recordatorios")
-        self.chk_promos = QCheckBox("Acepta promociones (WhatsApp/Email)")
+        self.cb_origen = QComboBox()
+        self.cb_origen.addItems(["Instagram", "TikTok", "Google", "Referido", "Otro"])
 
         form_p.addRow("Artista preferido:", self.cb_artista)
-        form_p.addRow("Estilos de interés:", self.lst_estilos)
+        form_p.addRow("Estilos favoritos:", self.lst_estilos)
         form_p.addRow("Zonas de interés:", self.lst_zonas)
         form_p.addRow("¿Cómo nos conoció?", self.cb_origen)
-        form_p.addRow("", self.chk_recordatorios)
-        form_p.addRow("", self.chk_promos)
 
         lay.addWidget(box_pref)
         lay.addStretch(1)
@@ -125,7 +149,7 @@ class NewClientPage(QWidget):
         w = QWidget()
         lay = QVBoxLayout(w); lay.setSpacing(12)
 
-        box_s = QGroupBox("Tamizaje de salud (básico)")
+        box_s = QGroupBox("Tamizaje de salud")
         v = QVBoxLayout(box_s)
         self.chk_alergias = QCheckBox("Alergias (látex, lidocaína, pigmentos, antibióticos)")
         self.chk_diabetes = QCheckBox("Diabetes")
@@ -141,7 +165,7 @@ class NewClientPage(QWidget):
                   self.chk_cardiaco, self.chk_anticoagulantes, self.chk_emb_lact, self.chk_sustancias, self.chk_derm]:
             v.addWidget(c)
 
-        self.txt_salud_obs = QTextEdit(); self.txt_salud_obs.setPlaceholderText("Observaciones (opcional)…")
+        self.txt_salud_obs = QTextEdit(); self.txt_salud_obs.setPlaceholderText("Observaciones")
         v.addWidget(self.txt_salud_obs)
 
         lay.addWidget(box_s)
@@ -154,7 +178,7 @@ class NewClientPage(QWidget):
 
         box_c = QGroupBox("Consentimientos")
         v = QVBoxLayout(box_c)
-        self.chk_consent_info = QCheckBox("He leído y acepto el consentimiento informado *")
+        self.chk_consent_info = QCheckBox("He leído y acepto el consentimiento informado*")
         self.chk_uso_imagen = QCheckBox("Autorizo el uso de imágenes con fines de portafolio/redes")
         self.chk_datos = QCheckBox("Acepto la política de datos personales")
         v.addWidget(self.chk_consent_info)
@@ -196,20 +220,8 @@ class NewClientPage(QWidget):
         return w
 
     # ---------- Helpers ----------
-    def _sync_whatsapp(self, _state):
-        if self.chk_wa_igual.isChecked():
-            self.in_wa.setText(self.in_tel.text())
-            self.in_tel.textChanged.connect(self._copy_tel_to_wa)
-        else:
-            try:
-                self.in_tel.textChanged.disconnect(self._copy_tel_to_wa)
-            except Exception:
-                pass
-
-    def _copy_tel_to_wa(self, _):
-        self.in_wa.setText(self.in_tel.text())
-
     def _wire_min_validation(self):
+        """Habilita los CTAs sólo si: nombre, primer apellido, teléfono y consentimiento informado están completos."""
         def update_enabled():
             obligatorios_ok = bool(self.in_nombres.text().strip()) and \
                               bool(self.in_ap1.text().strip()) and \

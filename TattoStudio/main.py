@@ -43,7 +43,7 @@ def main():
     mainw = MainWindow()
 
     # flujo: login -> principal
-    login.acceso_solicitado.connect(lambda: (login.hide(), mainw.show()))
+    login.acceso_solicitado.connect(lambda: (login.hide(), mainw.showMaximized()))
     # flujo: panel usuario -> cambiar usuario -> login
     mainw.solicitar_switch_user.connect(lambda: (mainw.hide(), login.show(), mainw.btn_user.setChecked(False)))
 

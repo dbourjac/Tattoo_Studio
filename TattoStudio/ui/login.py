@@ -29,7 +29,7 @@ class LoginWindow(QWidget):
         self.in_user = QLineEdit(); self.in_user.setPlaceholderText("Escribe tu usuario...")
 
         lbl_code = QLabel("Código de acceso")
-        self.in_code = QLineEdit(); self.in_code.setPlaceholderText("Ej. 1234-ABCD")
+        self.in_code = QLineEdit(); self.in_code.setPlaceholderText("Escribe tu código...")
         self.in_code.setEchoMode(QLineEdit.Password)
 
         form.addWidget(lbl_user);  form.addWidget(self.in_user)
@@ -42,7 +42,7 @@ class LoginWindow(QWidget):
         self.btn_login.clicked.connect(self.acceso_solicitado.emit)
         root.addWidget(self.btn_login)
 
-        hint = QLabel("*(Mock) No valida credenciales; solo continúa)*")
+        hint = QLabel("*No valida credenciales xd*")
         hint.setAlignment(Qt.AlignCenter)
         hint.setObjectName("Hint")
         root.addWidget(hint)

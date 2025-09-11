@@ -1,133 +1,186 @@
-/* Fuente y base */
-QWidget { font-family: 'Segoe UI', Arial; font-size: 11pt; color: #111; }
-#Topbar { background: #ffffff; border-bottom: 1px solid #eee; }
+/* ===== TattooStudio — LIGHT (same palette) =====
+   Palette used:
+   F8F9FA, E9ECEF, DEE2E6, CED4DA, ADB5BD, 6C757D, 495057, 343A40, 212529
+   - Fondo general: E9ECEF (menos “blanco” para no cansar)
+   - Topbar: 343A40 (más oscuro que el contenido)
+   - Texto primario: 212529
+================================================= */
+
+/* Base */
+QWidget {
+  font-family: 'Segoe UI', Arial;
+  font-size: 11pt;
+  color: #212529;
+  background: #E9ECEF;           /* gris suave, no blanco puro */
+}
+
+/* Topbar más oscuro que el cuerpo */
+#Topbar {
+  background: #343A40;           /* dark slate */
+  border-bottom: 1px solid #212529;
+}
 #Topbar QWidget { background: transparent; }
-#Brand { font-weight: 700; font-size: 18px; padding-left: 4px; }
-#H1 { font-size: 32px; font-weight: 800; letter-spacing: -0.5px; }
-#Logo { background: transparent; }
-QLabel#Hint { color: #666; font-size: 10pt; }
+#Brand { font-weight: 700; font-size: 18px; color: #F8F9FA; }
+#H1    { font-size: 32px; font-weight: 800; letter-spacing: -0.5px; color: #212529; }
+#Logo, #BrandLogo { background: transparent; }
+QLabel#Hint { color: #6C757D; font-size: 10pt; }
 
-/* Navegación pills */
+/* Navegación (píldoras) */
 QToolButton#PillNav {
-    background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 10px;
-    padding: 6px 12px; color: #111;
+  background: #DEE2E6;
+  border: 1px solid #CED4DA;
+  border-radius: 10px;
+  padding: 6px 12px;
+  color: #212529;
 }
-QToolButton#PillNav:hover { background: #e5e7eb; }
-QToolButton#PillNav:checked { background: #111; color: #fff; border-color: #111; }
+QToolButton#PillNav:hover   { background: #CED4DA; }
+QToolButton#PillNav:checked {
+  background: #212529;
+  color: #F8F9FA;
+  border-color: #212529;
+}
 
-/* CTA y botones secundarios */
+/* Botones */
 QPushButton#CTA {
-    background: #2b2b2b; color: #fff; border: none; border-radius: 10px;
-    padding: 10px 16px; font-weight: 600;
+  background: #212529;           /* acento oscuro */
+  color: #F8F9FA;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-weight: 600;
 }
-QPushButton#CTA:hover { background: #1f1f1f; }
+QPushButton#CTA:hover { background: #343A40; }
+
 QPushButton#GhostSmall {
-    background: #f3f4f6; color: #111; border: 1px solid #e5e7eb;
-    border-radius: 8px; padding: 4px 10px; text-align: left;
+  background: #E9ECEF;
+  color: #212529;
+  border: 1px solid #CED4DA;
+  border-radius: 8px;
+  padding: 4px 10px;
+  text-align: left;
 }
-QPushButton#GhostSmall:hover { background: #e5e7eb; }
+QPushButton#GhostSmall:hover { background: #DEE2E6; }
 
-/* Botón de usuario (avatar textual + nombre) + panel desplegable */
+/* Botón de usuario + panel */
 QToolButton#UserButton {
-    background: #ffffff; border: 1px solid #e5e7eb; border-radius: 16px;
-    padding: 6px 10px; color: #111;
+  background: #F8F9FA;
+  border: 1px solid #CED4DA;
+  border-radius: 16px;
+  padding: 6px 10px;
+  color: #212529;
 }
-QToolButton#UserButton:hover { background: #f6f6f6; }
-QFrame#UserPanel {
-    background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px;
-}
-QLabel#UserName { font-weight: 700; }
-QLabel#UserMeta  { color: #555; }
+QToolButton#UserButton:hover { background: #E9ECEF; }
 
-/* Inputs del formulario */
+QFrame#UserPanel {
+  background: #F8F9FA;
+  border: 1px solid #CED4DA;
+  border-radius: 10px;
+}
+QLabel#UserName { font-weight: 700; color: #212529; }
+QLabel#UserMeta  { color: #6C757D; }
+
+/* Formularios */
 QLineEdit, QTextEdit, QDateEdit, QComboBox {
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    padding: 8px 10px;
-    background: #fff;
-    color: #111;
+  background: #F8F9FA;
+  color: #212529;
+  border: 1px solid #CED4DA;
+  border-radius: 8px;
+  padding: 8px 10px;
 }
 QLineEdit:focus, QTextEdit:focus, QDateEdit:focus, QComboBox:focus {
-    border: 1px solid #111;
-    outline: none;
+  border: 1px solid #495057;     /* focus visible */
+  outline: none;
+}
+QAbstractItemView {
+  background: #FFFFFF;
+  color: #212529;
+  selection-background-color: #E9ECEF;
+  selection-color: #212529;
+  border: 1px solid #CED4DA;
+}
+QToolTip {
+  background: #FFFFFF;
+  color: #212529;
+  border: 1px solid #CED4DA;
 }
 
 /* GroupBox y Tabs */
 QGroupBox {
-    border: 1px solid #eee;
-    border-radius: 8px;
-    margin-top: 10px;
-    padding: 8px 10px;
+  background: #F8F9FA;
+  border: 1px solid #DEE2E6;
+  border-radius: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
 }
 QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 4px;
-    color: #222;
-    font-weight: 600;
+  subcontrol-origin: margin; left: 10px; padding: 0 4px;
+  color: #212529; font-weight: 600;
 }
-QTabWidget::pane { border: 1px solid #eee; border-radius: 8px; }
+QTabWidget::pane { border: 1px solid #DEE2E6; border-radius: 8px; }
 QTabBar::tab {
-    background: #f3f4f6; border: 1px solid #e5e7eb; border-bottom: none;
-    padding: 6px 12px; margin-right: 4px; border-top-left-radius: 8px; border-top-right-radius: 8px;
+  background: #E9ECEF; border: 1px solid #CED4DA; border-bottom: none;
+  padding: 6px 12px; margin-right: 4px;
+  border-top-left-radius: 8px; border-top-right-radius: 8px; color: #212529;
 }
-QTabBar::tab:selected { background: #fff; border-color: #e5e7eb; }
+QTabBar::tab:selected { background: #F8F9FA; border-color: #CED4DA; }
 
-QFrame#Card { background: palette(base); border: 1px solid #e5e7eb; border-radius: 10px; }
-
-QFrame#Card {
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  padding: 0px;
-  background: palette(base);
+/* Scrollbars */
+QScrollBar:vertical {
+  background: #E9ECEF;
+  width: 12px;
+  margin: 0;
 }
-
-/* Cards reusables */
-QFrame#Card { border: 1px solid #e5e7eb; border-radius: 10px; background: palette(base); }
-QLabel#BadgeRole { background:#eef2ff; color:#3730a3; border-radius:8px; padding:2px 6px; }
-QLabel#BadgeState { background:#f1f5f9; color:#0f172a; border-radius:8px; padding:2px 6px; }
-
-/* Chips reutilizables */
-QPushButton#Chip {
-  background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px;
-  padding: 6px 12px; color: #111;
-}
-QPushButton#Chip:hover { background: #e5e7eb; }
-QPushButton#Chip:checked { background: #111; color: #fff; border-color: #111; }
-
-/* Tarjetas */
-QFrame#Card { background: palette(base); border: 1px solid #e5e7eb; border-radius: 12px; }
-
-/* KPI cards */
-QFrame#CardKPI {
-  background: palette(base);
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-}
-
-/* Cards genéricas (si no las tenías) */
-QFrame#Card {
-  background: palette(base);
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-}
-
-/* Chips ya los usamos en Reports; por si acaso: */
-QPushButton#Chip {
-  background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px;
-  padding: 6px 12px; color: #111;
-}
-QPushButton#Chip:hover { background: #e5e7eb; }
-QPushButton#Chip:checked { background: #111; color: #fff; border-color: #111; }
-
-/* Sidebar */
-QFrame#Sidebar {
-  background: palette(base);
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-}
-
-/* Chips de agenda (Day/Week) se colorean inline, aquí solo padding/bordes) */
-QFrame#ChipAppt {
+QScrollBar::handle:vertical {
+  background: #CED4DA;
+  min-height: 24px;
   border-radius: 6px;
+  border: 1px solid #ADB5BD;
 }
+QScrollBar::handle:vertical:hover { background: #ADB5BD; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+
+/* Status bar */
+QStatusBar { background: #343A40; color: #6C757D; }
+QStatusBar::item {
+  border: 0px;
+  background: transparent;
+}
+
+QLabel#ClockLabel {
+  background: transparent;
+  padding-right: 8px;   /* o el que te guste */
+  /* color se hereda del QStatusBar */
+}
+
+/* Tarjetas / chips reutilizables */
+QFrame#Card, QFrame#CardKPI, QFrame#Sidebar {
+  background: #FFFFFF;
+  border: 1px solid #DEE2E6;
+  border-radius: 12px;
+}
+QPushButton#Chip {
+  background: #E9ECEF;
+  border: 1px solid #CED4DA;
+  border-radius: 8px;
+  padding: 6px 12px;
+  color: #212529;
+}
+QPushButton#Chip:hover { background: #DEE2E6; }
+QPushButton#Chip:checked {
+  background: #212529; color: #F8F9FA; border-color: #212529;
+}
+
+/* Agenda chips: solo shape; color inline desde Python */
+QFrame#ChipAppt { border-radius: 6px; }
+
+/* Logo pequeño del topbar */
+QLabel#BrandLogo { background: transparent; }
+
+/* Hero (logo central): sin fondo */
+QLabel#HeroLogo { background: transparent; }
+
+/* Reloj del status bar */
+QStatusBar::item { border: 0px; background: transparent; }
+QLabel#ClockLabel { background: transparent; padding-right: 8px; }
+
+QFrame#Toolbar { border: 1px solid #CED4DA; border-radius: 10px; background: palette(base); }

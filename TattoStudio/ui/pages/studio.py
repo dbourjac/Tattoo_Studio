@@ -1,70 +1,115 @@
+# ui/pages/studio.py
+from pathlib import Path
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QLabel, QPushButton,
     QSpacerItem, QSizePolicy
 )
 
-
 class StudioPage(QWidget):
     """
-    Portada con los CTAs principales del flujo:
-    - Nuevo cliente (abre formulario)
-    - Cliente recurrente (va a Clientes)
-    - Portafolios
-    - Fila (Queue)
+    Portada:
+      - Logo central (centrado y grande, sin deformarse).
+      - Título del estudio.
+      - 4 CTAs justo debajo del título.
     """
+    ir_nueva_cita    = pyqtSignal()
     ir_nuevo_cliente = pyqtSignal()
-    ir_cliente_recurrente = pyqtSignal()
-    ir_portafolios = pyqtSignal()
-    ir_fila = pyqtSignal()
+    ir_caja          = pyqtSignal()
+    ir_portafolios   = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, studio_name: str = "TattooStudio"):
         super().__init__()
+        self.studio_name = studio_name
 
-        root = QHBoxLayout(self)
-        root.setContentsMargins(40, 20, 40, 20)
-        root.setSpacing(24)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(32, 24, 32, 24)
+        root.setSpacing(0)
 
-        # Spacer izquierdo (centrado flexible)
-        root.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        # Un poco de aire respecto a la topbar
+        root.addSpacerItem(QSpacerItem(0, 12, QSizePolicy.Minimum, QSizePolicy.Fixed))
 
-        # Columna central (logo/título/CTAs)
-        col = QVBoxLayout()
-        col.setSpacing(16)
-        col.setAlignment(Qt.AlignHCenter)
+        # --- LOGO CENTRAL ---
+        self._hero_src = self._load_logo()          # pixmap original (si existe)
+        self.logo_lbl = QLabel()
+        self.logo_lbl.setObjectName("HeroLogo")
+        self.logo_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+        self.logo_lbl.setScaledContents(False)      # ¡no deformar!
+        root.addWidget(self.logo_lbl, 0, Qt.AlignHCenter)   # <- centrado en el layout
 
-        logo = QLabel()                 # (más adelante puedes setPixmap)
-        logo.setFixedSize(160, 160)
-        logo.setObjectName("Logo")
-        col.addWidget(logo, alignment=Qt.AlignHCenter)
-
-        title = QLabel("TattooStudio")
+        # --- TÍTULO ---
+        title = QLabel(self.studio_name)
         title.setObjectName("H1")
-        col.addWidget(title, alignment=Qt.AlignHCenter)
+        title.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+        root.addSpacing(8)
+        root.addWidget(title, 0, Qt.AlignHCenter)
 
+        # --- CTAs debajo del título ---
+        root.addSpacing(12)
         ctas = QVBoxLayout(); ctas.setSpacing(10)
 
-        btn_new = QPushButton("Nuevo cliente"); btn_new.setObjectName("CTA")
-        btn_new.setMinimumWidth(320); btn_new.setMinimumHeight(36)
-        btn_new.clicked.connect(self.ir_nuevo_cliente.emit)
+        def cta(texto: str) -> QPushButton:
+            b = QPushButton(texto)
+            b.setObjectName("CTA")
+            b.setMinimumWidth(320)
+            b.setMinimumHeight(40)
+            return b
 
-        btn_return = QPushButton("Cliente recurrente"); btn_return.setObjectName("CTA")
-        btn_return.setMinimumWidth(320); btn_return.setMinimumHeight(36)
-        btn_return.clicked.connect(self.ir_cliente_recurrente.emit)
+        btn_cita = cta("Nueva cita")
+        btn_cli  = cta("Nuevo cliente")
+        btn_caja = cta("Caja rápida")
+        btn_port = cta("Portafolios")
 
-        btn_port = QPushButton("Portafolios"); btn_port.setObjectName("CTA")
-        btn_port.setMinimumWidth(320); btn_port.setMinimumHeight(36)
+        for b in (btn_cita, btn_cli, btn_caja, btn_port):
+            ctas.addWidget(b, 0, Qt.AlignHCenter)
+
+        root.addLayout(ctas)
+        root.addStretch(1)  # empuja un poco hacia arriba el bloque principal
+
+        # Señales públicas
+        btn_cita.clicked.connect(self.ir_nueva_cita.emit)
+        btn_cli.clicked.connect(self.ir_nuevo_cliente.emit)
+        btn_caja.clicked.connect(self.ir_caja.emit)
         btn_port.clicked.connect(self.ir_portafolios.emit)
 
-        btn_queue = QPushButton("Fila"); btn_queue.setObjectName("CTA")
-        btn_queue.setMinimumWidth(320); btn_queue.setMinimumHeight(36)
-        btn_queue.clicked.connect(self.ir_fila.emit)
+        # primer pintado del logo
+        self._update_logo_pix()
 
-        for b in (btn_new, btn_return, btn_port, btn_queue):
-            ctas.addWidget(b)
+    # ---------- utilidades ----------
+    def _load_logo(self) -> QPixmap:
+        """Carga assets/logo.png si existe."""
+        logo_path = Path(__file__).parents[2] / "assets" / "logo.png"
+        return QPixmap(str(logo_path)) if logo_path.exists() else QPixmap()
 
-        col.addLayout(ctas)
-        root.addLayout(col, stretch=2)
+    def _update_logo_pix(self) -> None:
+        """
+        Escala el logo respetando proporción.
+        - Altura objetivo ≈ 28% del alto de la ventana.
+        - Clamp entre 200 y 380 px para que siempre se vea “pro”.
+        """
+        if self._hero_src.isNull():
+            self.logo_lbl.clear()
+            self.logo_lbl.setFixedSize(0, 0)
+            return
 
-        # Spacer derecho
-        root.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        h_total = max(0, self.height())
+        target_h = int(h_total * 0.90)
+        target_h = max(200, min(target_h, 380))   # <- más grande que antes
+
+        ar = self._hero_src.width() / self._hero_src.height() if self._hero_src.height() else 1.0
+        target_w = int(target_h * ar)
+
+        scaled = self._hero_src.scaled(
+            target_w, target_h,
+            Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+
+        self.logo_lbl.setPixmap(scaled)
+        # el QLabel adopta el tamaño del pixmap (no se estira)
+        self.logo_lbl.setFixedSize(scaled.size())
+        self.logo_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._update_logo_pix()
