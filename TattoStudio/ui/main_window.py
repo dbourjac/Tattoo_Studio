@@ -148,11 +148,20 @@ class MainWindow(QMainWindow):
         self.idx_inv_detail   = self.stack.addWidget(self.inventory_detail)
         self.inventory_moves  = InventoryMovementsPage()
         self.idx_inv_moves    = self.stack.addWidget(self.inventory_moves)
+        self.inventory_dash.ir_items        = lambda: self._ir(self.idx_inv_items)
+        self.inventory_dash.ir_movimientos  = lambda: self._ir(self.idx_inv_moves)
+        self.inventory_dash.nuevo_item      = lambda: self._ir(self.idx_inv_new_item)
+        self.inventory_items.abrir_item     = lambda it: (self.inventory_detail.load_item(it), self._ir(self.idx_inv_detail))
+        self.inventory_items.nuevo_item     = lambda: self._ir(self.idx_inv_new_item)
+        self.inventory_items.nueva_entrada  = lambda it: self._ir(self.idx_inv_entry)
+        self.inventory_items.nuevo_ajuste   = lambda it: self._ir(self.idx_inv_adjust)
+        self.inventory_detail.volver.connect(lambda: self._ir(self.idx_inv_items))
 
         # Placeholders de acciones inventario
-        self.idx_inv_new_item = self.stack.addWidget(make_simple_page("Nuevo ítem (placeholder)"))
-        self.idx_inv_entry    = self.stack.addWidget(make_simple_page("Nueva entrada (placeholder)"))
-        self.idx_inv_adjust   = self.stack.addWidget(make_simple_page("Ajuste de inventario (placeholder)"))
+        self.inventory_moves.volver.connect(lambda: self._ir(self.idx_inventory))
+        self.idx_inv_new_item = self.stack.addWidget(make_simple_page("Nuevo ítem"))
+        self.idx_inv_entry    = self.stack.addWidget(make_simple_page("Nueva entrada"))
+        self.idx_inv_adjust   = self.stack.addWidget(make_simple_page("Ajuste de inventario"))
 
         # Nuevo cliente (página de pestañas)
         self.new_client_page = NewClientPage()
@@ -189,11 +198,11 @@ class MainWindow(QMainWindow):
         self.btn_studio.setChecked(True)
 
         # =========================
-        #  Status bar (sin reloj)
+        #  Status bar
         # =========================
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage("Ver. 0.1.1 | Último respaldo —")
+        status.showMessage("Ver. 0.1.2 | Último respaldo —")
 
         # =========================
         #  Layout raíz
