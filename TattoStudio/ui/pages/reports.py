@@ -2,28 +2,27 @@
 from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QLineEdit, QComboBox, QDateEdit, QTableWidget, QTableWidgetItem,
+    QComboBox, QDateEdit, QTableWidget, QTableWidgetItem,
     QSizePolicy, QSpacerItem
 )
 
 class ReportsPage(QWidget):
     """
-    Reportes financieros (cascarón con UX completa y datos mock):
-      - Toolbar: Exportar CSV (deshabilitado por ahora)
-      - Rangos rápidos: Hoy / Esta semana / Este mes + Rango personalizado
+    Reportes financieros (mock):
+      - Toolbar superior con Exportar (deshabilitado)
+      - Rangos rápidos: Hoy / Semana / Mes / Custom (con date edits)
       - Filtros: Artista, Tipo de pago
-      - Tarjeta 'Ventas' con pestañas (chips) y total calculado
-      - Tabla 'Transacciones' con paginación (tamaño de página, prev/next)
-    NOTA: todo es mock; más adelante conectamos a BD y exportación real.
+      - Tarjeta "Ventas" con chips (Sales/Trends/Commissions/Tips/Payouts) + Total
+      - Tabla 'Transacciones' con paginación (tamaño de página + prev/next)
     """
 
     def __init__(self):
         super().__init__()
 
         # -------- estado/UI --------
-        self.period = "today"          # today | week | month | custom
-        self.mode = "Sales"            # pestañas de la tarjeta: Sales/Trends/Commissions/Tips/Payouts (mock)
-        self.page_size = 5
+        self.period = "today"            # today | week | month | custom
+        self.mode = "Sales"              # Sales | Trends | Commissions | Tips | Payouts (mock)
+        self.page_size = 10              # tamaño por página por defecto
         self.current_page = 1
 
         self.filter_artist = "Todos"
@@ -42,7 +41,8 @@ class ReportsPage(QWidget):
         root.addWidget(title)
 
         # ===================== Toolbar superior =====================
-        toolbar = QHBoxLayout(); toolbar.setSpacing(8)
+        tb_wrap = QFrame(); tb_wrap.setObjectName("Toolbar")
+        toolbar = QHBoxLayout(tb_wrap); toolbar.setSpacing(8); toolbar.setContentsMargins(10, 8, 10, 8)
 
         # (placeholder) Exportar CSV
         self.btn_export = QPushButton("Exportar CSV")
@@ -50,10 +50,11 @@ class ReportsPage(QWidget):
         toolbar.addWidget(self._icon_chip("📁", self.btn_export))
 
         toolbar.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        root.addLayout(toolbar)
+        root.addWidget(tb_wrap)
 
         # ===================== Rangos rápidos =====================
-        period_row = QHBoxLayout(); period_row.setSpacing(8)
+        pr_wrap = QFrame(); pr_wrap.setObjectName("Toolbar")
+        period_row = QHBoxLayout(pr_wrap); period_row.setSpacing(8); period_row.setContentsMargins(10, 8, 10, 8)
 
         self.btn_today = self._chip("Hoy", checked=True)
         self.btn_week  = self._chip("Esta semana")
@@ -71,8 +72,9 @@ class ReportsPage(QWidget):
         self.btn_custom.clicked.connect(lambda: self._set_period("custom"))
         period_row.addWidget(self.btn_custom)
 
-        # Controles del rango personalizado (se muestran solo en custom)
-        self.custom_box = QFrame(); cb = QHBoxLayout(self.custom_box); cb.setSpacing(6); cb.setContentsMargins(0,0,0,0)
+        # Controles del rango personalizado (solo visibles en 'custom')
+        self.custom_box = QFrame(); cb = QHBoxLayout(self.custom_box)
+        cb.setSpacing(6); cb.setContentsMargins(0, 0, 0, 0)
         cb.addWidget(QLabel("De:"))
         self.dt_from = QDateEdit(QDate.currentDate()); self.dt_from.setCalendarPopup(True)
         cb.addWidget(self.dt_from)
@@ -80,20 +82,22 @@ class ReportsPage(QWidget):
         self.dt_to = QDateEdit(QDate.currentDate()); self.dt_to.setCalendarPopup(True)
         cb.addWidget(self.dt_to)
         self.custom_box.setVisible(False)
+        period_row.addWidget(self.custom_box)
+
         # aplicar cambio de rango
         self.dt_from.dateChanged.connect(self._on_custom_dates)
         self.dt_to.dateChanged.connect(self._on_custom_dates)
 
-        period_row.addWidget(self.custom_box)
         period_row.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        root.addLayout(period_row)
+        root.addWidget(pr_wrap)
 
         # ===================== Filtros =====================
-        filters = QHBoxLayout(); filters.setSpacing(8)
+        flt_wrap = QFrame(); flt_wrap.setObjectName("Toolbar")
+        filters = QHBoxLayout(flt_wrap); filters.setSpacing(8); filters.setContentsMargins(10, 8, 10, 8)
 
         filters.addWidget(QLabel("Artista:"))
         self.cbo_artist = QComboBox(); self.cbo_artist.addItems(
-            ["Todos", "Dylan Bourjac", "Karla Medina", "Luis Rangel", "Alex Torres", "Hiro Tanaka"]
+            ["Todos", "Dylan Bourjac", "Jesus Esquer", "Pablo Velasquez", "Alex Chavez", "Jenni Rivera"]
         )
         self.cbo_artist.currentTextChanged.connect(self._on_filters)
         filters.addWidget(self.cbo_artist)
@@ -105,7 +109,7 @@ class ReportsPage(QWidget):
         filters.addWidget(self.cbo_payment)
 
         filters.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        root.addLayout(filters)
+        root.addWidget(flt_wrap)
 
         # ===================== Tarjeta 'Ventas' =====================
         card = QFrame(); card.setObjectName("Card")
@@ -113,16 +117,12 @@ class ReportsPage(QWidget):
 
         # Header de la tarjeta
         hdr = QHBoxLayout(); hdr.setSpacing(8)
-        hdr_title = QLabel("Ventas")
-        hdr_title.setStyleSheet("font-weight:700;")
+        hdr_title = QLabel("Ventas"); hdr_title.setStyleSheet("font-weight:700;")
         self.lbl_date = QLabel(self._period_text())
-        self.lbl_total = QLabel("")  # lo actualizamos tras cargar datos
-        hdr.addWidget(hdr_title)
-        hdr.addSpacing(12)
-        hdr.addWidget(self.lbl_date)
+        self.lbl_total = QLabel(""); self.lbl_total.setStyleSheet("font-weight:800;")
+        hdr.addWidget(hdr_title); hdr.addSpacing(12); hdr.addWidget(self.lbl_date)
         hdr.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        hdr.addWidget(QLabel("Total:"))
-        hdr.addWidget(self.lbl_total)
+        hdr.addWidget(QLabel("Total:")); hdr.addWidget(self.lbl_total)
         card_lay.addLayout(hdr)
 
         # Chips tipo pestañas (mock)
@@ -132,16 +132,14 @@ class ReportsPage(QWidget):
         self.tab_comm  = self._chip("Commissions")
         self.tab_tips  = self._chip("Tips")
         self.tab_pay   = self._chip("Payouts")
-
         self.tab_sales.clicked.connect(lambda: self._set_mode("Sales"))
         self.tab_trend.clicked.connect(lambda: self._set_mode("Trends"))
         self.tab_comm.clicked.connect(lambda: self._set_mode("Commissions"))
         self.tab_tips.clicked.connect(lambda: self._set_mode("Tips"))
         self.tab_pay.clicked.connect(lambda: self._set_mode("Payouts"))
-
         for b in (self.tab_sales, self.tab_trend, self.tab_comm, self.tab_tips, self.tab_pay):
             tabs.addWidget(b)
-        tabs.addSpacerItem(QSpacerItem(20,10,QSizePolicy.Expanding,QSizePolicy.Minimum))
+        tabs.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
         card_lay.addLayout(tabs)
 
         root.addWidget(card)
@@ -149,7 +147,6 @@ class ReportsPage(QWidget):
         # ===================== Tabla 'Transacciones' =====================
         box = QFrame(); box.setObjectName("Card")
         box_l = QVBoxLayout(box); box_l.setContentsMargins(16, 12, 16, 12); box_l.setSpacing(8)
-
         box_l.addWidget(QLabel("Transacciones"))
 
         self.tbl = QTableWidget(0, 5)
@@ -163,13 +160,12 @@ class ReportsPage(QWidget):
         pager = QHBoxLayout(); pager.setSpacing(8)
         pager.addWidget(QLabel("Por página:"))
         self.cbo_page = QComboBox(); self.cbo_page.addItems(["5", "10", "25"])
+        self.cbo_page.setCurrentText(str(self.page_size))
         self.cbo_page.currentTextChanged.connect(self._on_page_size)
         pager.addWidget(self.cbo_page)
-
         pager.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
         self.btn_prev = QPushButton("⟵"); self.btn_next = QPushButton("⟶")
-        self.btn_prev.clicked.connect(self._prev_page)
-        self.btn_next.clicked.connect(self._next_page)
+        self.btn_prev.clicked.connect(self._prev_page); self.btn_next.clicked.connect(self._next_page)
         self.lbl_page = QLabel("Página 1/1")
         pager.addWidget(self.btn_prev); pager.addWidget(self.btn_next); pager.addWidget(self.lbl_page)
 
@@ -189,28 +185,58 @@ class ReportsPage(QWidget):
 
     def _icon_chip(self, icon_text: str, btn: QPushButton) -> QWidget:
         """Componente pequeño: icono + botón (visual)."""
-        box = QHBoxLayout(); box.setContentsMargins(0,0,0,0); box.setSpacing(6)
-        w = QWidget(); w.setLayout(box)
+        w = QWidget(); box = QHBoxLayout(w); box.setContentsMargins(0, 0, 0, 0); box.setSpacing(6)
         ico = QLabel(icon_text); ico.setStyleSheet("font-size:16px;")
         box.addWidget(ico); box.addWidget(btn)
         return w
 
     # ---------------- seed / filtros / render ----------------
     def _seed_mock(self):
-        """Datos de ejemplo. Fechas repartidas para probar rangos."""
+        """Más dummies repartidos en 2 meses para que se note la paginación/rangos."""
         d = QDate.currentDate()
-        # formato: (fecha, cliente, monto, tipo_pago, artista)
-        self._rows = [
-            (d,              "Ana López",     1200.0, "Tarjeta",  "Dylan Bourjac"),
-            (d.addDays(-1),  "Carlos Ruiz",    800.0, "Efectivo", "Karla Medina"),
-            (d.addDays(-3),  "María Pérez",   1500.0, "Tarjeta",  "Luis Rangel"),
-            (d.addDays(-6),  "Daniel Soto",    600.0, "Efectivo", "Alex Torres"),
-            (d.addDays(-8),  "Ivanna Cruz",   2200.0, "Tarjeta",  "Hiro Tanaka"),
-            (d.addDays(-15), "Jorge Neri",     900.0, "Efectivo", "Dylan Bourjac"),
-            (d.addDays(-22), "Laura Gil",     1600.0, "Tarjeta",  "Karla Medina"),
-            (d.addDays(-28), "Pedro León",     700.0, "Efectivo", "Luis Rangel"),
-            (d.addMonths(-1).addDays(-5), "Sara Kim", 1800.0, "Tarjeta", "Alex Torres"),
-        ]
+        base = [
+    (-2,  "Valeria Ríos",      1150.0, "Tarjeta",  "Dylan Bourjac"),
+    (-4,  "Andrés Salgado",     780.0, "Efectivo", "Jesus Esquer"),
+    (-5,  "Camila Herrera",    1650.0, "Tarjeta",  "Pablo Velasquez"),
+    (-7,  "Rodrigo Ávila",      600.0, "Efectivo", "Alex Chavez"),
+    (-9,  "Fernanda Núñez",    2100.0, "Tarjeta",  "Jenni Rivera"),
+    (-11, "Santiago Varela",    920.0, "Efectivo", "Dylan Bourjac"),
+    (-17, "Paola Medina",      1400.0, "Tarjeta",  "Jesus Esquer"),
+    (-19, "Ricardo Pineda",     890.0, "Efectivo", "Pablo Velasquez"),
+    (-21, "Lucía Carrillo",    1750.0, "Tarjeta",  "Alex Chavez"),
+    (-22, "Miguel Andrade",     650.0, "Efectivo", "Jenni Rivera"),
+    (-24, "Carolina Prieto",   1250.0, "Tarjeta",  "Dylan Bourjac"),
+    (-26, "Héctor Lozano",      720.0, "Efectivo", "Jesus Esquer"),
+    (-27, "Adriana Rentería",  1850.0, "Tarjeta",  "Pablo Velasquez"),
+    (-29, "Noemí Duarte",      1320.0, "Tarjeta",  "Alex Chavez"),
+    (-30, "Julián Castaño",     540.0, "Efectivo", "Jenni Rivera"),
+    (-31, "Ximena Valdez",     1600.0, "Tarjeta",  "Dylan Bourjac"),
+    (-33, "Mauricio Ochoa",     980.0, "Efectivo", "Jesus Esquer"),
+    (-34, "Regina Campos",     2200.0, "Tarjeta",  "Pablo Velasquez"),
+    (-3,  "Luis Alberto Cano",  870.0, "Efectivo", "Alex Chavez"),
+    (-6,  "Arantxa Molina",    1900.0, "Tarjeta",  "Jenni Rivera"),
+    (-8,  "Iván Rosales",       560.0, "Efectivo", "Dylan Bourjac"),
+    (-10, "Diana Córdova",     1450.0, "Tarjeta",  "Jesus Esquer"),
+    (-12, "Emilio Serrano",     990.0, "Efectivo", "Pablo Velasquez"),
+    (-13, "Montserrat Lara",   1720.0, "Tarjeta",  "Alex Chavez"),
+    (-14, "Brenda Quintero",    640.0, "Efectivo", "Jenni Rivera"),
+    (-15, "Gustavo Ibarra",    1550.0, "Tarjeta",  "Dylan Bourjac"),
+    (-16, "Melissa Paredes",    700.0, "Efectivo", "Jesus Esquer"),
+    (-18, "Sofía Arce",        2000.0, "Tarjeta",  "Pablo Velasquez"),
+    (-20, "Diego Zepeda",       590.0, "Efectivo", "Alex Chavez"),
+    (-23, "Natalia Jurado",    1380.0, "Tarjeta",  "Jenni Rivera"),
+    (-25, "Marcos Benítez",     860.0, "Efectivo", "Dylan Bourjac"),
+    (-28, "Elena Porras",      1670.0, "Tarjeta",  "Jesus Esquer"),
+    (-32, "Sebastián Rubio",    730.0, "Efectivo", "Pablo Velasquez"),
+    (-35, "Teresa Aguilar",    1800.0, "Tarjeta",  "Alex Chavez"),
+    (0,   "Fabiola Gálvez",    1200.0, "Tarjeta",  "Jenni Rivera"),
+    (-1,  "Óscar Miranda",      650.0, "Efectivo", "Dylan Bourjac"),
+    (-2,  "Mariela Cota",      1420.0, "Tarjeta",  "Jesus Esquer"),
+    (-4,  "Cristian Beltrán",   780.0, "Efectivo", "Pablo Velasquez"),
+    (-7,  "Alejandra Peña",    1950.0, "Tarjeta",  "Alex Chavez"),
+    (-9,  "Kevin Lozoya",       520.0, "Efectivo", "Jenni Rivera")
+]
+        self._rows = [(d.addDays(delta), cli, monto, pay, art) for (delta, cli, monto, pay, art) in base]
 
     def _period_text(self) -> str:
         if self.period == "today":
@@ -251,13 +277,11 @@ class ReportsPage(QWidget):
             return date_ok and artist_ok and pay_ok
 
         rows = [r for r in self._rows if keep(r)]
-
-        # orden básico por fecha desc
-        rows.sort(key=lambda r: (r[0].toJulianDay(), r[1]), reverse=True)
+        rows.sort(key=lambda r: (r[0].toJulianDay(), r[1]), reverse=True)  # fecha desc, luego cliente
         return rows
 
     def _refresh(self):
-        """Recalcula filtros, pagina tabla y actualiza totales."""
+        """Recalcula filtros, pagina la tabla y actualiza total."""
         rows = self._apply_filters()
 
         # paginación
@@ -305,7 +329,6 @@ class ReportsPage(QWidget):
         self._refresh()
 
     def _on_custom_dates(self, _):
-        # actualizar fechas elegidas y refrescar
         self.custom_from = self.dt_from.date()
         self.custom_to = self.dt_to.date()
         self.current_page = 1
@@ -325,7 +348,7 @@ class ReportsPage(QWidget):
         try:
             self.page_size = int(self.cbo_page.currentText())
         except Exception:
-            self.page_size = 5
+            self.page_size = 10
         self.current_page = 1
         self._refresh()
 

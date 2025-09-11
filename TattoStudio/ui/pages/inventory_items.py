@@ -1,5 +1,6 @@
 # ui/pages/inventory_items.py
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QTableWidget, QTableWidgetItem, QFrame, QSizePolicy, QSpacerItem
@@ -7,9 +8,10 @@ from PyQt5.QtWidgets import (
 
 class InventoryItemsPage(QWidget):
     """
-    Lista de ítems (cascarón):
-    - Buscar, filtros (Categoría, Estado, Caducidad)
-    - Tabla con acciones: Ver (abre ficha), Entrada/Ajuste (placeholders)
+    Lista de ítems (mock):
+    - CTA "Nuevo ítem"
+    - Toolbar (pastilla) con Buscar + Filtros (Categoría, Estado, Caducidad)
+    - Tabla con acciones: Ver | Entrada | Ajuste
     - Paginación simple
     Señales: abrir_item(dict), nuevo_item(), nueva_entrada(dict), nuevo_ajuste(dict)
     """
@@ -20,85 +22,140 @@ class InventoryItemsPage(QWidget):
 
     def __init__(self):
         super().__init__()
+        # Callbacks que MainWindow reemplaza
         self.abrir_item = lambda item: None
         self.nuevo_item = lambda: None
         self.nueva_entrada = lambda item: None
         self.nuevo_ajuste = lambda item: None
 
-        self.page_size = 10
+        # Estado de filtros/paginación
+        self.page_size = 20
         self.current_page = 1
         self.search_text = ""
         self.f_cat = "Todas"; self.f_state = "Activos"; self.f_exp = "Todos"
 
-        root = QVBoxLayout(self); root.setContentsMargins(24,24,24,24); root.setSpacing(12)
+        # Fondo transparente para labels/headers
+        self.setStyleSheet(
+            "QLabel { background: transparent; }"
+            "QHeaderView::section { background: transparent; }"
+        )
 
-        title = QLabel("Ítems"); title.setObjectName("H1"); root.addWidget(title)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(12)
 
-        # Toolbar
-        toolbar = QHBoxLayout(); toolbar.setSpacing(8)
+        # ===== Título =====
+        title = QLabel("Ítems")
+        title.setObjectName("H1")
+        root.addWidget(title)
+
+        # ===== Fila CTA =====
+        row_cta = QHBoxLayout(); row_cta.setSpacing(8)
         self.btn_new = QPushButton("Nuevo ítem"); self.btn_new.setObjectName("CTA")
+        self.btn_new.setMinimumHeight(34)
         self.btn_new.clicked.connect(lambda: self.nuevo_item())
-        toolbar.addWidget(self.btn_new)
-        toolbar.addSpacerItem(QSpacerItem(20,10,QSizePolicy.Expanding,QSizePolicy.Minimum))
-        root.addLayout(toolbar)
+        row_cta.addWidget(self.btn_new)
+        row_cta.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        root.addLayout(row_cta)
 
-        # Filtros
-        filters = QHBoxLayout(); filters.setSpacing(8)
+        # ===== Toolbar (pastilla) Buscar + Filtros =====
+        tb_frame = QFrame(); tb_frame.setObjectName("Toolbar")
+        tb = QHBoxLayout(tb_frame); tb.setContentsMargins(10, 8, 10, 8); tb.setSpacing(8)
+
         self.search = QLineEdit(); self.search.setPlaceholderText("Buscar por nombre, SKU o marca…")
         self.search.textChanged.connect(self._on_search)
-        filters.addWidget(self.search, stretch=1)
+        tb.addWidget(self.search, stretch=1)
 
-        filters.addWidget(QLabel("Categoría:"))
-        self.cbo_cat = QComboBox(); self.cbo_cat.addItems(["Todas","Tintas","Agujas","EPP","Limpieza"])
-        self.cbo_cat.currentTextChanged.connect(self._on_filter); filters.addWidget(self.cbo_cat)
+        tb.addWidget(QLabel("Categoría:"))
+        self.cbo_cat = QComboBox(); self.cbo_cat.addItems(["Todas", "Tintas", "Agujas", "EPP", "Limpieza", "Aftercare", "Consumibles"])
+        self.cbo_cat.currentTextChanged.connect(self._on_filter); tb.addWidget(self.cbo_cat)
 
-        filters.addWidget(QLabel("Estado:"))
-        self.cbo_state = QComboBox(); self.cbo_state.addItems(["Activos","Archivados","Todos"])
-        self.cbo_state.currentTextChanged.connect(self._on_filter); filters.addWidget(self.cbo_state)
+        tb.addWidget(QLabel("Estado:"))
+        self.cbo_state = QComboBox(); self.cbo_state.addItems(["Activos", "Archivados", "Todos"])
+        self.cbo_state.currentTextChanged.connect(self._on_filter); tb.addWidget(self.cbo_state)
 
-        filters.addWidget(QLabel("Caducidad:"))
-        self.cbo_exp = QComboBox(); self.cbo_exp.addItems(["Todos","Con caducidad","Sin caducidad"])
-        self.cbo_exp.currentTextChanged.connect(self._on_filter); filters.addWidget(self.cbo_exp)
+        tb.addWidget(QLabel("Caducidad:"))
+        self.cbo_exp = QComboBox(); self.cbo_exp.addItems(["Todos", "Con caducidad", "Sin caducidad"])
+        self.cbo_exp.currentTextChanged.connect(self._on_filter); tb.addWidget(self.cbo_exp)
 
-        root.addLayout(filters)
+        root.addWidget(tb_frame)
 
-        # Tabla
+        # ===== Tabla =====
         self.tbl = QTableWidget(0, 9)
         self.tbl.setHorizontalHeaderLabels(
-            ["SKU","Nombre","Categoría","Unidad","Stock","Mínimo","Caduca","Proveedor","Acciones"]
+            ["SKU", "Nombre", "Categoría", "Unidad", "Stock", "Mínimo", "Caduca", "Proveedor", "Acciones"]
         )
         self.tbl.horizontalHeader().setStretchLastSection(True)
+        # Tamaños/legibilidad
+        self.tbl.verticalHeader().setDefaultSectionSize(30)
+        self.tbl.setAlternatingRowColors(True)
         self.tbl.setEditTriggers(self.tbl.NoEditTriggers)
+        self.tbl.setSelectionMode(self.tbl.NoSelection)
+        # Ajustes de columnas
+        self.tbl.horizontalHeader().setDefaultSectionSize(140)
+        self.tbl.horizontalHeader().setMinimumSectionSize(80)
+        self.tbl.horizontalHeader().resizeSection(0, 120)  # SKU
+        self.tbl.horizontalHeader().resizeSection(1, 280)  # Nombre (un poco más ancho)
+        self.tbl.horizontalHeader().resizeSection(4, 80)   # Stock
+        self.tbl.horizontalHeader().resizeSection(5, 80)   # Mínimo
+        self.tbl.horizontalHeader().resizeSection(6, 90)   # Caduca
+        self.tbl.horizontalHeader().resizeSection(8, 220)  # Acciones
         root.addWidget(self.tbl, stretch=1)
 
-        # Paginación simple
+        # ===== Paginación =====
         pager = QHBoxLayout(); pager.setSpacing(8)
         self.btn_prev = QPushButton("⟵"); self.btn_next = QPushButton("⟶")
         self.lbl_page = QLabel("Página 1/1")
+        for b in (self.btn_prev, self.btn_next):
+            b.setObjectName("GhostSmall"); b.setMinimumHeight(28)
         self.btn_prev.clicked.connect(self._prev); self.btn_next.clicked.connect(self._next)
         pager.addWidget(self.btn_prev); pager.addWidget(self.btn_next); pager.addWidget(self.lbl_page)
-        pager.addSpacerItem(QSpacerItem(20,10,QSizePolicy.Expanding,QSizePolicy.Minimum))
+        pager.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
         root.addLayout(pager)
 
+        # Datos mock + render
         self._seed_mock()
         self._refresh()
 
     # ---------- datos mock ----------
     def _seed_mock(self):
-        # campos: sku, nombre, cat, unidad, stock, minimo, caduca(bool), proveedor, activo(bool)
+        # (sku, nombre, cat, unidad, stock, minimo, caduca(bool), proveedor, activo(bool))
         self._all = [
-            ("TIN-NE-250", "Tinta Negra 250ml", "Tintas", "ml", 3, 5, True, "Dynamic", True),
-            ("AGJ-3RL", "Cartucho 3RL", "Agujas", "pieza", 5, 15, False, "Cheyenne", True),
-            ("EPP-GUA-M", "Guantes M", "EPP", "par", 2, 10, False, "Kimberly", True),
-            ("LIM-ALC", "Alcohol Isopropílico", "Limpieza", "ml", 900, 500, False, "3M", True),
-            ("TIN-RJ-30", "Tinta Roja 30ml", "Tintas", "ml", 10, 6, True, "Eternal", True),
-            ("EPP-MASC", "Cubrebocas", "EPP", "pieza", 40, 30, False, "3M", True),
-            ("EPP-BATA", "Bata desechable", "EPP", "pieza", 0, 10, False, "MedCare", False),  # Archivado
+            # Tintas
+            ("TIN-NE-250", "Tinta Negra 250ml",       "Tintas",      "ml",    3,   5,  True,  "Dynamic",   True),
+            ("TIN-RJ-030", "Tinta Roja 30ml",         "Tintas",      "ml",   10,   6,  True,  "Eternal",   True),
+            ("TIN-AZ-030", "Tinta Azul 30ml",         "Tintas",      "ml",    7,   6,  True,  "Eternal",   True),
+            ("TIN-BK-120", "Blackwork 120ml",         "Tintas",      "ml",   14,  10,  True,  "Solid Ink", True),
+            ("TIN-WH-120", "Blanco 120ml",            "Tintas",      "ml",    2,   4,  True,  "Dynamic",   True),
+            # Agujas / cartuchos
+            ("AGJ-3RL",    "Cartucho 3RL",            "Agujas",      "pieza",  5,  15,  False, "Cheyenne",  True),
+            ("AGJ-5RL",    "Cartucho 5RL",            "Agujas",      "pieza", 24,  10,  False, "Kwadron",   True),
+            ("AGJ-7RM",    "Cartucho 7RM",            "Agujas",      "pieza", 12,  10,  False, "Kwadron",   True),
+            # EPP
+            ("EPP-GUA-M",  "Guantes M",               "EPP",         "par",    2,  10,  False, "Kimberly",  True),
+            ("EPP-GUA-L",  "Guantes L",               "EPP",         "par",   16,  10,  False, "Kimberly",  True),
+            ("EPP-MASC",   "Cubrebocas",              "EPP",         "pieza", 40,  30,  False, "3M",        True),
+            ("EPP-BATA",   "Bata desechable",         "EPP",         "pieza",  0,  10,  False, "MedCare",   False),  # Archivado
+            # Limpieza
+            ("LIM-ALC",    "Alcohol Isopropílico",    "Limpieza",    "ml",   900, 500, False, "3M",        True),
+            ("LIM-JAB",    "Jabón Verde 1L",          "Limpieza",    "ml",   350, 200, False, "Cosmo",     True),
+            ("LIM-SLN",    "Solución salina 500ml",   "Limpieza",    "ml",   120,  80, False, "KOHL",      True),
+            # Aftercare
+            ("AFC-CREM",   "Crema post tattoo 50g",   "Aftercare",   "pz",    18,  20,  True,  "Hustle",    True),
+            ("AFC-FILM",   "Film protector 10m",      "Aftercare",   "rollo",  6,   5,  False, "Saniderm",  True),
+            # Consumibles
+            ("CON-RAS",    "Rasuradores desechables", "Consumibles", "pz",    70,  50, False, "Gillette",  True),
+            ("CON-GASA",   "Gasa estéril",            "Consumibles", "pz",     8,  20, False, "BD",        True),
+            ("CON-TOA",    "Toallas desechables",     "Consumibles", "pz",   180, 120, False, "Kimsoft",   True),
+            ("CON-BOT",    "Botellas 250ml",          "Consumibles", "pz",    20,  20, False, "Generic",   True),
+            ("CON-BAN",    "Banditas adhesivas",      "Consumibles", "pz",    14,  30, False, "Curad",     True),
+            ("CON-PAÑ",    "Pañitos húmedos",         "Consumibles", "pz",    22,  18, False, "Kleenex",   True),
         ]
 
     # ---------- lógica UI ----------
     def _apply_filters(self):
         txt = self.search_text.lower().strip()
+
         def keep(r):
             sku, nombre, cat, _, _, _, caduca, _, activo = r
             if self.f_cat != "Todas" and cat != self.f_cat: return False
@@ -108,17 +165,17 @@ class InventoryItemsPage(QWidget):
             if self.f_exp == "Sin caducidad" and caduca: return False
             if txt and txt not in (sku + " " + nombre + " " + cat).lower(): return False
             return True
+
         rows = [r for r in self._all if keep(r)]
-        # ordenar por nombre
-        rows.sort(key=lambda x: x[1].lower())
+        rows.sort(key=lambda x: x[1].lower())  # por nombre
         return rows
 
     def _refresh(self):
         rows = self._apply_filters()
-        total = max(1, (len(rows)+self.page_size-1)//self.page_size)
+        total = max(1, (len(rows) + self.page_size - 1) // self.page_size)
         self.current_page = min(self.current_page, total)
-        start = (self.current_page-1)*self.page_size
-        page = rows[start:start+self.page_size]
+        start = (self.current_page - 1) * self.page_size
+        page = rows[start:start + self.page_size]
 
         self.tbl.setRowCount(0)
         for r in page:
@@ -126,11 +183,29 @@ class InventoryItemsPage(QWidget):
             for col, val in enumerate(r[:8]):
                 if col == 6:  # caduca bool → Sí/No
                     val = "Sí" if val else "No"
-                self.tbl.setItem(row, col, QTableWidgetItem(str(val)))
-            # Acciones: Ver | Entrada | Ajuste
-            w = QWidget(); box = QHBoxLayout(w); box.setContentsMargins(0,0,0,0); box.setSpacing(6)
+                item = QTableWidgetItem(str(val))
+                # Alineaciones útiles
+                if col in (4, 5):  # Stock / Mínimo
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.tbl.setItem(row, col, item)
+
+            # Señal de bajo stock: Stock < Mínimo → rojo
+            stock_item = self.tbl.item(row, 4)
+            min_item   = self.tbl.item(row, 5)
+            try:
+                stk = int(stock_item.text()); mn = int(min_item.text())
+                if stk < mn:
+                    stock_item.setForeground(QBrush(QColor("#b91c1c")))  # rojo oscuro
+            except Exception:
+                pass
+
+            # Acciones
+            w = QWidget(); box = QHBoxLayout(w); box.setContentsMargins(0, 0, 0, 0); box.setSpacing(6)
             b_ver = QPushButton("Ver"); b_ent = QPushButton("Entrada"); b_adj = QPushButton("Ajuste")
-            sku = r[0]
+            for b in (b_ver, b_ent, b_adj):
+                b.setObjectName("GhostSmall"); b.setMinimumHeight(26)
+                box.addWidget(b)
+
             item_dict = {
                 "sku": r[0], "nombre": r[1], "categoria": r[2], "unidad": r[3],
                 "stock": r[4], "minimo": r[5], "caduca": r[6], "proveedor": r[7], "activo": r[8]
@@ -138,8 +213,7 @@ class InventoryItemsPage(QWidget):
             b_ver.clicked.connect(lambda _, it=item_dict: self.abrir_item(it))
             b_ent.clicked.connect(lambda _, it=item_dict: self.nueva_entrada(it))
             b_adj.clicked.connect(lambda _, it=item_dict: self.nuevo_ajuste(it))
-            for b in (b_ver, b_ent, b_adj):
-                b.setMinimumHeight(26); box.addWidget(b)
+
             self.tbl.setCellWidget(row, 8, w)
 
         self.lbl_page.setText(f"Página {self.current_page}/{total}")
@@ -147,12 +221,23 @@ class InventoryItemsPage(QWidget):
         self.btn_next.setEnabled(self.current_page < total)
 
     # ---------- eventos ----------
-    def _on_search(self, t): self.search_text = t; self.current_page = 1; self._refresh()
-    def _on_filter(self, _): 
+    def _on_search(self, t):
+        self.search_text = t
+        self.current_page = 1
+        self._refresh()
+
+    def _on_filter(self, _):
         self.f_cat = self.cbo_cat.currentText()
         self.f_state = self.cbo_state.currentText()
         self.f_exp = self.cbo_exp.currentText()
-        self.current_page = 1; self._refresh()
-    def _prev(self): 
-        if self.current_page > 1: self.current_page -= 1; self._refresh()
-    def _next(self): self.current_page += 1; self._refresh()
+        self.current_page = 1
+        self._refresh()
+
+    def _prev(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self._refresh()
+
+    def _next(self):
+        self.current_page += 1
+        self._refresh()
