@@ -202,7 +202,7 @@ class MainWindow(QMainWindow):
         # =========================
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage("Ver. 0.1.2 | Último respaldo —")
+        status.showMessage("Ver. 0.1.3 | Último respaldo —")
 
         # =========================
         #  Layout raíz

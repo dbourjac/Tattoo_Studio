@@ -1,0 +1,15 @@
+# === Runtime ===
+PyQt5>=5.15,<6
+SQLAlchemy>=2.0,<3
+alembic>=1.13,<2
+python-dotenv>=1.0,<2
+Faker>=25,<26
+
+# === Testing ===
+pytest>=8,<9
+pytest-cov>=5,<6
+
+# === Code quality (formato/estilo) ===
+black>=24,<25
+isort>=5.13,<6
+flake8>=7,<8
