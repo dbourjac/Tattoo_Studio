@@ -1,5 +1,15 @@
 from datetime import datetime
-from typing import TypedDict, Literal, Optional
+from typing import TypedDict, Literal, Optional, Dict
+
+_current_user: Optional[Dict] = None
+
+def set_current_user(u: Optional[Dict]):
+    global _current_user
+    _current_user = u
+
+def get_current_user() -> Optional[Dict]:
+    return _current_user
+
 
 PaymentMethod = Literal["Efectivo", "Tarjeta", "Transferencia"]
 

@@ -1,6 +1,7 @@
-# ui/pages/agenda.py
 from dataclasses import dataclass
 from typing import List, Dict, Optional
+from datetime import datetime, timedelta, time
+
 from PyQt5.QtCore import Qt, QDate, QTime, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
@@ -8,27 +9,36 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QLineEdit, QHeaderView, QSizePolicy
 )
 
+# === NUEVO: importamos servicios/modelos para leer de la BD ===
+from services.sessions import list_sessions  # API que ya devuelve sesiones con start/end/artist_id/client_id/status
+from data.db.session import SessionLocal
+from data.models.client import Client
+from data.models.artist import Artist as DBArtist
+
+
 # ==============================
-#   MODELO (mock en memoria)
+#   MODELOS DE UI (DTOs)
 # ==============================
 
 @dataclass
 class Artist:
-    id: str
+    """Modelo ligero SOLO para la UI (color friendly)."""
+    id: str            # usamos str para que encaje con el código existente
     name: str
-    color: str  # color del artista para pintar la cita
+    color: str         # color del artista para pintar la cita
 
 
 @dataclass
 class Appt:
+    """Cita ‘renderizable’ en las vistas."""
     id: str
     client_name: str
     artist_id: str
     date: QDate
     start: QTime
     duration_min: int
-    service: str
-    status: str  # pending/confirmed/in_progress/done/no_show/cancelled
+    service: str       # usamos ‘notes’ como servicio/título
+    status: str        # Activa/Completada/Cancelada/En espera
 
 
 # ==============================
@@ -37,13 +47,17 @@ class Appt:
 
 class AgendaPage(QWidget):
     """
-    Cascarón de Agenda:
+    Agenda integrada con BD:
     - Toolbar: Hoy, <, >, selector de fecha, selector de vista, CTA 'Nueva cita'
     - Sidebar: Búsqueda, filtros por artista/estado
     - Vistas: Día / Semana / Mes / Lista
+    - Los datos YA NO son mocks: se leen de SQLite mediante services/models.
     """
     crear_cita = pyqtSignal()
     abrir_cita = pyqtSignal(dict)
+
+    # Paleta fija para colorear artistas (mismo color por artista de forma estable)
+    _PALETTE = ["#4ade80", "#60a5fa", "#f472b6", "#9d0dc1", "#f59e0b", "#22d3ee", "#a78bfa", "#34d399"]
 
     def __init__(self):
         super().__init__()
@@ -60,20 +74,12 @@ class AgendaPage(QWidget):
         self.day_end   = QTime(22, 0)
         self.step_min  = 30
 
-        # ------- Datos MOCK -------
-        self.artists: List[Artist] = [
-            Artist("a1", "Dylan",   "#4ade80"),        # verde
-            Artist("a2", "Jesus",    "#60a5fa"),        # azul
-            Artist("a3", "Alex", "#f472b6"),  # rosa
-            Artist("a4", "Pablo", "#9d0dc1"),  # morado
-        ]
-        today = QDate.currentDate()
-        self.appts: List[Appt] = [
-            Appt("c1", "Galileo Galilei",  "a1", today, QTime(10, 0), 60,  "Línea fina", "pending"),
-            Appt("c2", "José José", "a2", today, QTime(11,30), 90,  "Color",      "confirmed"),
-            Appt("c3", "Jenni Rivera",   "a1", today, QTime(15, 0), 120, "Realismo",   "in_progress"),
-            Appt("c4", "Lolita Ayala",   "a3", today, QTime(15, 0), 180, "Realismo",   "in_progress"),
-        ]
+        # ------- Datos desde BD -------
+        self.artists: List[Artist] = []   # se llena con _load_artists_from_db()
+        self.appts: List[Appt] = []       # se llena con _fetch_sessions_from_db() según el rango visible
+
+        # Cargamos artistas ANTES de construir la sidebar (para generar los checkboxes correctos)
+        self._load_artists_from_db()
 
         # ------- UI -------
         root = QVBoxLayout(self)
@@ -96,7 +102,7 @@ class AgendaPage(QWidget):
         split.addWidget(self.views_stack)
         split.setSizes([220, 900])
 
-        # Subvistas
+        # Subvistas (sin cambios de estructura)
         self.day_view   = DayView(self)
         self.week_view  = WeekView(self)
         self.month_view = MonthView(self)
@@ -139,7 +145,7 @@ class AgendaPage(QWidget):
 
         # Vista
         lbl_vista = QLabel("Vista:")
-        lbl_vista.setStyleSheet("background: transparent;")  # (2) sin fondo
+        lbl_vista.setStyleSheet("background: transparent;")
         lay.addSpacing(6); lay.addWidget(lbl_vista)
         self.cbo_view = QComboBox()
         self.cbo_view.addItems(["Día", "Semana", "Mes", "Lista"])
@@ -149,7 +155,7 @@ class AgendaPage(QWidget):
 
         lay.addStretch(1)
 
-        # CTA Nueva cita
+        # CTA Nueva cita (sigue emitiendo la señal, la crearemos en otra etapa)
         self.btn_new = QPushButton("Nueva cita")
         self.btn_new.setObjectName("CTA")
         self.btn_new.clicked.connect(lambda: self.crear_cita.emit())
@@ -166,7 +172,7 @@ class AgendaPage(QWidget):
 
         def title(text: str) -> QLabel:
             lbl = QLabel(text)
-            lbl.setStyleSheet("background: transparent; font-weight: 600;")  # (2) sin fondo
+            lbl.setStyleSheet("background: transparent; font-weight: 600;")
             return lbl
 
         # Búsqueda
@@ -174,7 +180,7 @@ class AgendaPage(QWidget):
         self.search.textChanged.connect(self._on_filter_changed)
         lay.addWidget(title("Buscar")); lay.addWidget(self.search)
 
-        # Artistas
+        # Artistas (desde BD)
         lay.addWidget(title("Artistas"))
         self.artist_checks: Dict[str, QCheckBox] = {}
         for a in self.artists:
@@ -183,10 +189,10 @@ class AgendaPage(QWidget):
             self.artist_checks[a.id] = chk
             lay.addWidget(chk)
 
-        # Estado
+        # Estado (ALINEADO con la BD: Activa/Completada/Cancelada/En espera)
         lay.addWidget(title("Estado"))
         self.cbo_status = QComboBox()
-        self.cbo_status.addItems(["Todos","pending","confirmed","in_progress","done","no_show","cancelled"])
+        self.cbo_status.addItems(["Todos", "Activa", "Completada", "Cancelada", "En espera"])
         self.cbo_status.currentTextChanged.connect(self._on_filter_changed)
         lay.addWidget(self.cbo_status)
 
@@ -223,38 +229,115 @@ class AgendaPage(QWidget):
 
     def _on_filter_changed(self, *_):
         selected = [aid for aid, chk in self.artist_checks.items() if chk.isChecked()]
+        # Si todos están seleccionados, usamos [] (equivale a "todos") para no filtrar por artista
         self.selected_artist_ids = selected if len(selected) != len(self.artist_checks) else []
         self.selected_status = self.cbo_status.currentText()
         self.search_text = self.search.text().strip().lower()
         self._refresh_all()
 
+    # ---------- Carga de datos desde BD ----------
+    def _load_artists_from_db(self):
+        """Lee artistas de la BD y genera un color estable por artista."""
+        self.artists.clear()
+        with SessionLocal() as db:
+            rows = db.query(DBArtist.id, DBArtist.name).order_by(DBArtist.name.asc()).all()
+        for idx, (aid, name) in enumerate(rows):
+            # color estable por índice (o podrías hashear el id)
+            color = self._PALETTE[idx % len(self._PALETTE)]
+            self.artists.append(Artist(id=str(aid), name=name, color=color))
+
+    def _current_visible_range(self) -> (QDate, QDate):
+        """Devuelve el rango [desde, hasta] (QDate) según la vista/fecha actual."""
+        if self.current_view == "day":
+            return self.current_date, self.current_date
+        if self.current_view == "week":
+            monday = self.current_date.addDays(-(self.current_date.dayOfWeek()-1))
+            return monday, monday.addDays(6)
+        if self.current_view == "month":
+            first = QDate(self.current_date.year(), self.current_date.month(), 1)
+            last  = first.addMonths(1).addDays(-1)
+            return first, last
+        # list: por defecto 30 días a partir de la fecha actual seleccionada
+        return self.current_date, self.current_date.addDays(30)
+
+    def _fetch_sessions_from_db(self):
+        """Consulta sesiones reales desde la BD (usando services.list_sessions) y arma self.appts."""
+        # 1) Determinar rango temporal en datetimes
+        q_from, q_to = self._current_visible_range()
+        start_dt = datetime.combine(q_from.toPyDate(), time(0, 0, 0))
+        end_dt   = datetime.combine(q_to.toPyDate(),   time(23, 59, 59))
+
+        # 2) Filtros por artista/estado (en esta versión filtramos artista desde la UI;
+        #    el estado lo filtramos también en UI porque en la BD usamos valores exactos)
+        params = {"from": start_dt, "to": end_dt}
+        rows = list_sessions(params)  # devuelve dicts: id, client_id, artist_id, start, end, status, price, notes
+
+        # 3) Resolver nombres de clientes de un jalón (cache en dict)
+        client_ids = {r["client_id"] for r in rows if r.get("client_id") is not None}
+        client_name_by_id: Dict[int, str] = {}
+        if client_ids:
+            with SessionLocal() as db:
+                for cid, name in db.query(Client.id, Client.name).filter(Client.id.in_(client_ids)).all():
+                    client_name_by_id[cid] = name
+
+        # 4) Armar los Appt para la UI
+        appts: List[Appt] = []
+        for r in rows:
+            # Convertir a tipos Qt para las vistas
+            start: datetime = r["start"]
+            end: Optional[datetime] = r.get("end") or (start + timedelta(minutes=60))  # fallback 60 min
+            qd = QDate(start.year, start.month, start.day)
+            qt = QTime(start.hour, start.minute)
+            duration = max(1, int((end - start).total_seconds() // 60))
+
+            appts.append(
+                Appt(
+                    id=str(r["id"]),
+                    client_name=client_name_by_id.get(r["client_id"], "Cliente"),
+                    artist_id=str(r["artist_id"]),
+                    date=qd,
+                    start=qt,
+                    duration_min=duration,
+                    service=r.get("notes") or "Tatuaje",
+                    status=r.get("status") or "Activa",
+                )
+            )
+        self.appts = appts
+
     # ---------- Helpers ----------
     def _artist_by_id(self, aid: str) -> Optional[Artist]:
         for a in self.artists:
-            if a.id == aid: return a
+            if a.id == aid:
+                return a
         return None
 
     def _filter_appts(self) -> List[Appt]:
-        rows = []
+        """Filtra en memoria según checkboxes/estado/búsqueda y rango visible."""
+        # Refrescar desde BD ANTES de filtrar (para que la vista siempre esté al día)
+        self._fetch_sessions_from_db()
+
+        rows: List[Appt] = []
         for ap in self.appts:
+            # Filtrar por artista: si hay selección, solo esos
             if self.selected_artist_ids and ap.artist_id not in self.selected_artist_ids:
                 continue
+            # Filtrar por estado (usa los valores de la BD)
             if self.selected_status != "Todos" and ap.status != self.selected_status:
                 continue
+            # Búsqueda por cliente
             if self.search_text and self.search_text not in ap.client_name.lower():
                 continue
             rows.append(ap)
 
-        if self.current_view == "day":
-            rows = [r for r in rows if r.date == self.current_date]
-        elif self.current_view == "week":
-            monday = self.current_date.addDays(-(self.current_date.dayOfWeek()-1))
-            sunday = monday.addDays(6)
-            rows = [r for r in rows if monday <= r.date <= sunday]
-        elif self.current_view == "month":
-            first = QDate(self.current_date.year(), self.current_date.month(), 1)
-            last  = first.addMonths(1).addDays(-1)
-            rows = [r for r in rows if first <= r.date <= last]
+        # Filtrar por rango visible (seguridad extra, aunque ya pedimos por rango)
+        start_q, end_q = self._current_visible_range()
+        def in_range(a: Appt) -> bool:
+            if self.current_view == "day":
+                return a.date == start_q
+            if self.current_view == "week" or self.current_view == "month" or self.current_view == "list":
+                return start_q <= a.date <= end_q
+            return True
+        rows = [r for r in rows if in_range(r)]
         return rows
 
     def _refresh_all(self):
@@ -283,7 +366,7 @@ class AgendaPage(QWidget):
 
 
 # ==============================
-#   SUB-VISTAS
+#   SUB-VISTAS (sin cambios estructurales)
 # ==============================
 
 def _short_name(name: str, limit: int = 12) -> str:
@@ -309,7 +392,7 @@ class DayView(QWidget):
 
         self.tbl = QTableWidget(); self.tbl.verticalHeader().setVisible(False)
         self.tbl.setEditTriggers(self.tbl.NoEditTriggers); self.tbl.setSelectionMode(self.tbl.NoSelection)
-        # (2) encabezados “transparentes”
+        # encabezados “transparentes”
         self.tbl.setStyleSheet("QHeaderView::section { background: transparent; }")
         lay.addWidget(self.tbl, stretch=1)
 
@@ -334,7 +417,7 @@ class DayView(QWidget):
         hdr.setSectionResizeMode(QHeaderView.Fixed)
         self.tbl.setColumnWidth(0, 80)                          # Hora
         for c in range(1, 1 + len(self.artist_order)):
-            hdr.setSectionResizeMode(c, QHeaderView.Stretch)    # artistas comparten espacio equitativo
+            hdr.setSectionResizeMode(c, QHeaderView.Stretch)    # artistas comparten espacio
 
         # Filas de hora
         t = QTime(self.day_start)
@@ -363,8 +446,6 @@ class DayView(QWidget):
 
             a = artist_lookup(ap.artist_id)
             base = a.color if a else "#666666"
-
-            # Estilo directo al widget (sin selector) para no ser sobreescrito por QSS
             chip.setStyleSheet(
                 f"background:{base};"
                 f"border:1px solid rgba(0,0,0,0.18);"

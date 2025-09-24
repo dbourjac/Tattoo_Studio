@@ -2,6 +2,8 @@ import os
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, scoped_session
 from .base import Base
+from data.models import load_all_models
+load_all_models()
 
 # Ruta del archivo SQLite. Si no hay variable de entorno, usa ./dev.db
 DB_PATH = os.getenv("DB_PATH", "./dev.db")

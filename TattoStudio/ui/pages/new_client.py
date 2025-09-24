@@ -1,23 +1,50 @@
-# ui/pages/new_client.py
+from __future__ import annotations
+
+# ============================================================
+# new_client.py — Formulario de Nuevo Cliente (BD real + RBAC)
+#
+# Cambios:
+# - Botón "← Volver" eliminado (se usa como popup; Cancelar/guardar emiten volver_atras).
+# - Guarda preferred_artist_id a partir del combo (lookup por nombre en artists).
+# - Señal cliente_creado(int) para refrescar lista desde MainWindow.
+# - FIX: indentación corregida en _save_client (db.add/commit/refresh).
+# ============================================================
+
 from PyQt5.QtCore import Qt, QDate, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QTabWidget, QGroupBox, QFormLayout,
     QLineEdit, QDateEdit, QComboBox, QCheckBox, QTextEdit, QListWidget,
-    QListWidgetItem, QHBoxLayout, QPushButton
+    QListWidgetItem, QHBoxLayout, QPushButton, QMessageBox
 )
+
+# BD / ORM
+from sqlalchemy.orm import Session
+from data.db.session import SessionLocal
+from data.models.client import Client
+from data.models.artist import Artist
+from datetime import datetime
+
+# RBAC (UI helper)
+from ui.pages.common import ensure_permission
+
+import unicodedata
+
+def _norm(s: str) -> str:
+    # quita tildes y baja a casefold
+    return "".join(ch for ch in unicodedata.normalize("NFD", s or "") if unicodedata.category(ch) != "Mn").casefold().strip()
+
 
 class NewClientPage(QWidget):
     """
-    Formulario (mock) de Nuevo Cliente:
-    - UI únicamente (sin guardado real).
-    - Tabs: Identificación & Contacto / Preferencias / Salud / Consentimientos / Emergencia / Notas & Archivos
+    Formulario (mock→real) de Nuevo Cliente:
+    - Tabs: Identificación & Contacto / Preferencias / Salud / Consentimientos / Emergencia / Notas
     - Botones al pie: Guardar / Guardar y agendar / Cancelar
-    Cambios:
-      * Eliminado WhatsApp (campo + checkbox) y reemplazado por Instagram
-      * Botón '← Volver' que emite la señal 'volver_atras'
+    - Señales:
+        * volver_atras()        -> el contenedor (QDialog) cierra
+        * cliente_creado(int)   -> id del cliente insertado en BD
     """
-    # Señal para que MainWindow navegue hacia atrás
     volver_atras = pyqtSignal()
+    cliente_creado = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
@@ -29,16 +56,7 @@ class NewClientPage(QWidget):
         root.setContentsMargins(24, 24, 16, 16)
         root.setSpacing(12)
 
-        # ---- Barra superior: Volver + Título ----
-        top = QHBoxLayout(); top.setSpacing(8)
-        self.btn_back = QPushButton("← Volver")
-        self.btn_back.setObjectName("GhostSmall")
-        self.btn_back.setMinimumHeight(32)
-        self.btn_back.clicked.connect(self.volver_atras.emit)
-        top.addWidget(self.btn_back)
-        top.addStretch(1)
-        root.addLayout(top)
-
+        # ---- Título (sin botón volver) ----
         title = QLabel("Nuevo cliente")
         title.setObjectName("H1")
         root.addWidget(title)
@@ -63,6 +81,11 @@ class NewClientPage(QWidget):
             b.setMinimumHeight(36)
             btn_bar.addWidget(b)
         root.addLayout(btn_bar)
+
+        # Wire de acciones (con gates de permiso en los handlers)
+        self.btn_guardar.clicked.connect(lambda: self._on_guardar(open_schedule=False))
+        self.btn_guardar_agendar.clicked.connect(lambda: self._on_guardar(open_schedule=True))
+        self.btn_cancelar.clicked.connect(self.volver_atras.emit)
 
         # Validación mínima para habilitar guardado
         self._wire_min_validation()
@@ -105,7 +128,6 @@ class NewClientPage(QWidget):
         self.in_ciudad = QLineEdit(); self.in_ciudad.setPlaceholderText("Ciudad (opcional)")
         self.in_estado = QLineEdit(); self.in_estado.setPlaceholderText("Estado (opcional)")
 
-        # (Se eliminó el checkbox 'WhatsApp igual al teléfono' y el campo WhatsApp)
         form_ct.addRow("Teléfono:", self.in_tel)
         form_ct.addRow("Instagram:", self.in_ig)
         form_ct.addRow("Correo:", self.in_mail)
@@ -234,3 +256,147 @@ class NewClientPage(QWidget):
             w.textChanged.connect(update_enabled)
         self.chk_consent_info.stateChanged.connect(update_enabled)
         update_enabled()
+
+    # ============================================================
+    # Guardado real + Permisos
+    # ============================================================
+    def _collect_payload(self) -> dict:
+        """Convierte inputs UI → dict para insertar. (Sólo campos que existan se asignarán)."""
+        nombres = self.in_nombres.text().strip()
+        ap1 = self.in_ap1.text().strip()
+        ap2 = self.in_ap2.text().strip()
+        full_name = " ".join([p for p in [nombres, ap1, ap2] if p]).strip()
+
+        payload = {
+            "name": full_name,
+            "phone": self.in_tel.text().strip() or None,
+            "email": self.in_mail.text().strip() or None,
+            "instagram": self.in_ig.text().strip() or None,
+            "city": self.in_ciudad.text().strip() or None,
+            "state": self.in_estado.text().strip() or None,
+            "notes": self.txt_notas.toPlainText().strip() or None,
+            "gender": self.cb_genero.currentText(),
+            "birthdate": self.in_fnac.date().toPyDate(),
+            "consent_info": bool(self.chk_consent_info.isChecked()),
+            "consent_image": bool(self.chk_uso_imagen.isChecked()),
+            "consent_data": bool(self.chk_datos.isChecked()),
+            "emergency_name": self.in_emerg_nombre.text().strip() or None,
+            "emergency_relation": self.in_emerg_rel.text().strip() or None,
+            "emergency_phone": self.in_emerg_tel.text().strip() or None,
+            # Salud
+            "health_allergies": bool(self.chk_alergias.isChecked()),
+            "health_diabetes": bool(self.chk_diabetes.isChecked()),
+            "health_coagulation": bool(self.chk_coagulacion.isChecked()),
+            "health_epilepsy": bool(self.chk_epilepsia.isChecked()),
+            "health_cardiac": bool(self.chk_cardiaco.isChecked()),
+            "health_anticoagulants": bool(self.chk_anticoagulantes.isChecked()),
+            "health_preg_lact": bool(self.chk_emb_lact.isChecked()),
+            "health_substances": bool(self.chk_sustancias.isChecked()),
+            "health_derm": bool(self.chk_derm.isChecked()),
+            "health_obs": self.txt_salud_obs.toPlainText().strip() or None,
+        }
+        return payload
+
+    def _find_artist_id_by_name(self, db, name: str) -> int | None:
+        if not name or _norm(name) == "sin preferencia":
+            return None
+
+        target = _norm(name).split()[0]  # primer token del combo (ej. "jesus")
+        winner_id = None
+        for a in db.query(Artist).all():
+            full = _norm(getattr(a, "name", "") or "")
+            first = (full.split()[0] if full else "")
+            if full == _norm(name) or first == target:
+                # elegimos el de menor id para estabilizar
+                aid = getattr(a, "id", None)
+                if aid is not None and (winner_id is None or aid < winner_id):
+                    winner_id = aid
+        return winner_id
+
+    def _save_client(self, db: Session, payload: dict, preferred_artist_name: str | None) -> int:
+        """
+        Inserta un Client con los campos que existan en el modelo.
+        Usa hasattr para asignar solo lo que tu esquema soporte.
+        Devuelve el id insertado.
+        """
+        obj = Client()
+
+        # preferred_artist_id a partir del combo
+        pref_id = self._find_artist_id_by_name(db, preferred_artist_name or "")
+        if pref_id is not None and hasattr(obj, "preferred_artist_id"):
+            try:
+                setattr(obj, "preferred_artist_id", pref_id)
+            except Exception:
+                pass
+
+        # Asignación segura campo a campo
+        for key, value in payload.items():
+            if hasattr(obj, key):
+                try:
+                    setattr(obj, key, value)
+                except Exception:
+                    pass
+
+        # Garantiza campos mínimos conocidos
+        if not getattr(obj, "name", None):
+            raise ValueError("Nombre del cliente vacío.")
+        if hasattr(obj, "is_active") and getattr(obj, "is_active", None) is None:
+            setattr(obj, "is_active", True)
+
+        # created_at: fallback por si la columna es NOT NULL y la BD no tiene default
+        if hasattr(obj, "created_at") and getattr(obj, "created_at", None) is None:
+            try:
+                setattr(obj, "created_at", datetime.now())
+            except Exception:
+                pass
+
+        # ✅ FIX: estas líneas deben ejecutarse SIEMPRE (no dentro de un except)
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        return getattr(obj, "id")
+
+    def _on_guardar(self, open_schedule: bool):
+        """
+        Handler de 'Guardar' y 'Guardar y agendar':
+        - Gate de permisos (clients.create).
+        - Inserción en BD.
+        - Emite cliente_creado(id) y deja que MainWindow refresque/navegue.
+        """
+        if not ensure_permission(self, "clients", "create"):
+            return
+
+        # Validación extra (defensiva)
+        if not self.in_nombres.text().strip() or not self.in_ap1.text().strip() or not self.in_tel.text().strip():
+            QMessageBox.warning(self, "Validación", "Faltan datos obligatorios (nombre, primer apellido y teléfono).")
+            return
+        if not self.chk_consent_info.isChecked():
+            QMessageBox.warning(self, "Consentimiento", "Debes aceptar el consentimiento informado.")
+            return
+
+        payload = self._collect_payload()
+        pref_name = self.cb_artista.currentText() if self.cb_artista.count() else None
+
+        self._set_buttons_enabled(False)
+        try:
+            with SessionLocal() as db:  # type: Session
+                client_id = self._save_client(db, payload, pref_name)
+        except Exception as ex:
+            QMessageBox.critical(self, "BD", f"No se pudo guardar el cliente:\n{ex}")
+            self._set_buttons_enabled(True)
+            return
+
+        # Notificar & UX
+        self.cliente_creado.emit(client_id)
+        if open_schedule:
+            QMessageBox.information(self, "Cliente creado", "Cliente guardado. Continúa para agendar su cita.")
+        else:
+            QMessageBox.information(self, "Cliente creado", "Cliente guardado exitosamente.")
+
+        self._set_buttons_enabled(True)
+        self.volver_atras.emit()  # el contenedor (QDialog) debe cerrar aquí
+
+    def _set_buttons_enabled(self, enabled: bool):
+        self.btn_guardar.setEnabled(enabled)
+        self.btn_guardar_agendar.setEnabled(enabled)
+        self.btn_cancelar.setEnabled(enabled)

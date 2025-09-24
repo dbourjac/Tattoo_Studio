@@ -5,13 +5,22 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QSpacerItem
 )
 
+# === NUEVO: imports para leer datos reales desde la BD ===
+from datetime import datetime, time
+from data.db.session import SessionLocal
+from data.models.transaction import Transaction
+from data.models.session_tattoo import TattooSession
+from data.models.client import Client
+from data.models.artist import Artist as DBArtist
+
+
 class ReportsPage(QWidget):
     """
-    Reportes financieros (mock):
+    Reportes financieros (con BD):
       - Toolbar superior con Exportar (deshabilitado)
       - Rangos rápidos: Hoy / Semana / Mes / Custom (con date edits)
-      - Filtros: Artista, Tipo de pago
-      - Tarjeta "Ventas" con chips (Sales/Trends/Commissions/Tips/Payouts) + Total
+      - Filtros: Artista (desde BD), Tipo de pago
+      - Tarjeta con chips (Ventas/Tendencias/Comisiones/Propinas/Liquidaciones) + Total
       - Tabla 'Transacciones' con paginación
     """
 
@@ -37,6 +46,12 @@ class ReportsPage(QWidget):
         self.filter_payment = "Todos"
         self.custom_from = QDate.currentDate()
         self.custom_to = QDate.currentDate()
+
+        # Data interna de la tabla (cada r = (QDate, cliente, monto, pago, artista))
+        self._rows = []
+
+        # Pre-cargar nombres de artistas desde BD para el combo
+        self._artist_names = self._fetch_artist_names()
 
         # -------- layout raíz --------
         root = QVBoxLayout(self)
@@ -112,9 +127,9 @@ class ReportsPage(QWidget):
         lbl_artist = QLabel("Artista:"); self._transparent(lbl_artist)
         filters.addWidget(lbl_artist)
 
-        self.cbo_artist = QComboBox(); self.cbo_artist.addItems(
-            ["Todos", "Dylan Bourjac", "Jesus Esquer", "Pablo Velasquez", "Alex Chavez", "Jenni Rivera"]
-        )
+        self.cbo_artist = QComboBox()
+        # Poblar desde BD: "Todos" + nombres
+        self.cbo_artist.addItems(["Todos"] + self._artist_names)
         self.cbo_artist.currentTextChanged.connect(self._on_filters)
         filters.addWidget(self.cbo_artist)
 
@@ -122,7 +137,8 @@ class ReportsPage(QWidget):
         lbl_pay = QLabel("Tipo de pago:"); self._transparent(lbl_pay)
         filters.addWidget(lbl_pay)
 
-        self.cbo_payment = QComboBox(); self.cbo_payment.addItems(["Todos", "Efectivo", "Tarjeta"])
+        self.cbo_payment = QComboBox()
+        self.cbo_payment.addItems(["Todos", "Efectivo", "Tarjeta", "Transferencia"])
         self.cbo_payment.currentTextChanged.connect(self._on_filters)
         filters.addWidget(self.cbo_payment)
 
@@ -200,17 +216,15 @@ class ReportsPage(QWidget):
         box_l.addLayout(pager)
         root.addWidget(box, stretch=1)
 
-        # ======= datos mock y primer render =======
-        self._seed_mock()
+        # ======= primer render (YA SIN MOCKS) =======
+        self._rows = self._query_rows()   # lee desde BD según filtros/rango actuales
         self._refresh()
 
     # ---------------- UI helpers ----------------
     def _transparent(self, *widgets):
         """Fondo completamente transparente para etiquetas (texto)."""
         for w in widgets:
-            # No obliga a ser top-level; solo asegura que el background no pinte.
             w.setAttribute(Qt.WA_StyledBackground, False)
-            # Conserva estilos previos y fuerza fondo transparente
             w.setStyleSheet((w.styleSheet() or "") + ";\nbackground: transparent;")
 
     def _chip(self, text: str, checked: bool=False) -> QPushButton:
@@ -226,53 +240,12 @@ class ReportsPage(QWidget):
         box.addWidget(ico); box.addWidget(btn)
         return w
 
-    # ---------------- seed / filtros / render ----------------
-    def _seed_mock(self):
-        """Más dummies repartidos en 2 meses para que se note la paginación/rangos."""
-        d = QDate.currentDate()
-        base = [
-            (-2,  "Valeria Ríos",      1150.0, "Tarjeta",  "Dylan Bourjac"),
-            (-4,  "Andrés Salgado",     780.0, "Efectivo", "Jesus Esquer"),
-            (-5,  "Camila Herrera",    1650.0, "Tarjeta",  "Pablo Velasquez"),
-            (-7,  "Rodrigo Ávila",      600.0, "Efectivo", "Alex Chavez"),
-            (-9,  "Fernanda Núñez",    2100.0, "Tarjeta",  "Jenni Rivera"),
-            (-11, "Santiago Varela",    920.0, "Efectivo", "Dylan Bourjac"),
-            (-17, "Paola Medina",      1400.0, "Tarjeta",  "Jesus Esquer"),
-            (-19, "Ricardo Pineda",     890.0, "Efectivo", "Pablo Velasquez"),
-            (-21, "Lucía Carrillo",    1750.0, "Tarjeta",  "Alex Chavez"),
-            (-22, "Miguel Andrade",     650.0, "Efectivo", "Jenni Rivera"),
-            (-24, "Carolina Prieto",   1250.0, "Tarjeta",  "Dylan Bourjac"),
-            (-26, "Héctor Lozano",      720.0, "Efectivo", "Jesus Esquer"),
-            (-27, "Adriana Rentería",  1850.0, "Tarjeta",  "Pablo Velasquez"),
-            (-29, "Noemí Duarte",      1320.0, "Tarjeta",  "Alex Chavez"),
-            (-30, "Julián Castaño",     540.0, "Efectivo", "Jenni Rivera"),
-            (-31, "Ximena Valdez",     1600.0, "Tarjeta",  "Dylan Bourjac"),
-            (-33, "Mauricio Ochoa",     980.0, "Efectivo", "Jesus Esquer"),
-            (-34, "Regina Campos",     2200.0, "Tarjeta",  "Pablo Velasquez"),
-            (-3,  "Luis Alberto Cano",  870.0, "Efectivo", "Alex Chavez"),
-            (-6,  "Arantxa Molina",    1900.0, "Tarjeta",  "Jenni Rivera"),
-            (-8,  "Iván Rosales",       560.0, "Efectivo", "Dylan Bourjac"),
-            (-10, "Diana Córdova",     1450.0, "Tarjeta",  "Jesus Esquer"),
-            (-12, "Emilio Serrano",     990.0, "Efectivo", "Pablo Velasquez"),
-            (-13, "Montserrat Lara",   1720.0, "Tarjeta",  "Alex Chavez"),
-            (-14, "Brenda Quintero",    640.0, "Efectivo", "Jenni Rivera"),
-            (-15, "Gustavo Ibarra",    1550.0, "Tarjeta",  "Dylan Bourjac"),
-            (-16, "Melissa Paredes",    700.0, "Efectivo", "Jesus Esquer"),
-            (-18, "Sofía Arce",        2000.0, "Tarjeta",  "Pablo Velasquez"),
-            (-20, "Diego Zepeda",       590.0, "Efectivo", "Alex Chavez"),
-            (-23, "Natalia Jurado",    1380.0, "Tarjeta",  "Jenni Rivera"),
-            (-25, "Marcos Benítez",     860.0, "Efectivo", "Dylan Bourjac"),
-            (-28, "Elena Porras",      1670.0, "Tarjeta",  "Jesus Esquer"),
-            (-32, "Sebastián Rubio",    730.0, "Efectivo", "Pablo Velasquez"),
-            (-35, "Teresa Aguilar",    1800.0, "Tarjeta",  "Alex Chavez"),
-            (0,   "Fabiola Gálvez",    1200.0, "Tarjeta",  "Jenni Rivera"),
-            (-1,  "Óscar Miranda",      650.0, "Efectivo", "Dylan Bourjac"),
-            (-2,  "Mariela Cota",      1420.0, "Tarjeta",  "Jesus Esquer"),
-            (-4,  "Cristian Beltrán",   780.0, "Efectivo", "Pablo Velasquez"),
-            (-7,  "Alejandra Peña",    1950.0, "Tarjeta",  "Alex Chavez"),
-            (-9,  "Kevin Lozoya",       520.0, "Efectivo", "Jenni Rivera")
-        ]
-        self._rows = [(d.addDays(delta), cli, monto, pay, art) for (delta, cli, monto, pay, art) in base]
+    # ---------------- Carga de datos (BD) ----------------
+    def _fetch_artist_names(self):
+        """Regresa la lista de nombres de artistas (ordenados) para el combo."""
+        with SessionLocal() as db:
+            rows = db.query(DBArtist.name).order_by(DBArtist.name.asc()).all()
+        return [r[0] for r in rows]
 
     def _period_text(self) -> str:
         if self.period == "today":
@@ -300,19 +273,57 @@ class ReportsPage(QWidget):
         # custom
         return min(self.custom_from, self.custom_to), max(self.custom_from, self.custom_to)
 
+    def _query_rows(self):
+        """
+        Lee transacciones reales de la BD aplicando los filtros/rango actuales.
+        Devuelve lista de tuplas: (QDate, cliente, monto, pago, artista) ya ordenada por fecha desc.
+        """
+        q_from, q_to = self._date_range()
+
+        # Convertir QDate → datetime (inicio/fin del día)
+        start_dt = datetime.combine(q_from.toPyDate(), time(0, 0, 0))
+        end_dt   = datetime.combine(q_to.toPyDate(),   time(23, 59, 59))
+
+        with SessionLocal() as db:
+            q = (
+                db.query(
+                    Transaction.date,     # datetime
+                    Client.name,          # cliente
+                    Transaction.amount,   # monto
+                    Transaction.method,   # pago
+                    DBArtist.name,        # artista
+                )
+                .join(TattooSession, TattooSession.id == Transaction.session_id)
+                .join(Client, Client.id == TattooSession.client_id)
+                .join(DBArtist, DBArtist.id == Transaction.artist_id)
+                .filter(Transaction.date >= start_dt, Transaction.date <= end_dt)
+            )
+
+            # Filtro de artista por nombre (si no es "Todos")
+            if self.filter_artist != "Todos":
+                q = q.filter(DBArtist.name == self.filter_artist)
+
+            # Filtro de método de pago (si no es "Todos")
+            if self.filter_payment != "Todos":
+                q = q.filter(Transaction.method == self.filter_payment)
+
+            # Orden por fecha desc, luego cliente (como antes)
+            q = q.order_by(Transaction.date.desc(), Client.name.asc())
+            rows = q.all()
+
+        # Adaptar a formato de tabla: (QDate, str, float, str, str)
+        out = []
+        for dt, cli, amount, method, artist in rows:
+            qd = QDate(dt.year, dt.month, dt.day)
+            out.append((qd, cli, float(amount or 0.0), method, artist))
+        return out
+
     def _apply_filters(self):
-        start, end = self._date_range()
-        artist = self.filter_artist
-        payment = self.filter_payment
-
-        def keep(r):
-            date_ok = (start <= r[0] <= end)
-            artist_ok = (artist == "Todos" or r[4] == artist)
-            pay_ok = (payment == "Todos" or r[3] == payment)
-            return date_ok and artist_ok and pay_ok
-
-        rows = [r for r in self._rows if keep(r)]
-        rows.sort(key=lambda r: (r[0].toJulianDay(), r[1]), reverse=True)
+        """
+        Antes filtraba una lista mock. Ahora delega la ‘consulta’ a la BD
+        aplicando filtros/rango, y solo devuelve la lista ordenada.
+        """
+        rows = self._query_rows()
         return rows
 
     def _refresh(self):
@@ -329,13 +340,13 @@ class ReportsPage(QWidget):
         self.tbl.setRowCount(0)
         for r in page:
             row = self.tbl.rowCount(); self.tbl.insertRow(row)
-            self.tbl.setItem(row, 0, QTableWidgetItem(r[0].toString("dd/MM/yyyy")))
-            self.tbl.setItem(row, 1, QTableWidgetItem(r[1]))
-            self.tbl.setItem(row, 2, QTableWidgetItem(f"${r[2]:,.2f}"))
-            self.tbl.setItem(row, 3, QTableWidgetItem(r[3]))
-            self.tbl.setItem(row, 4, QTableWidgetItem(r[4]))
+            self.tbl.setItem(row, 0, QTableWidgetItem(r[0].toString("dd/MM/yyyy")))  # fecha (QDate)
+            self.tbl.setItem(row, 1, QTableWidgetItem(r[1]))                          # cliente
+            self.tbl.setItem(row, 2, QTableWidgetItem(f"${r[2]:,.2f}"))               # monto
+            self.tbl.setItem(row, 3, QTableWidgetItem(r[3]))                          # método
+            self.tbl.setItem(row, 4, QTableWidgetItem(r[4]))                          # artista
 
-        # total solo en 'sales'
+        # total según modo (por ahora solo 'sales' suma)
         total = sum(r[2] for r in rows) if self.mode == "sales" else 0.0
         self.lbl_total.setText(f"${total:,.2f}")
         self.lbl_date.setText(self._period_text())
@@ -350,7 +361,7 @@ class ReportsPage(QWidget):
             b.setChecked(False)
         {"today": self.btn_today, "week": self.btn_week, "month": self.btn_month, "custom": self.btn_custom}[self.period].setChecked(True)
 
-        # Exclusividad de pestañas por CLAVE, no por texto
+        # Exclusividad de pestañas por CLAVE, no por texto (evita crash al traducir)
         for key, btn in self.tab_buttons.items():
             btn.setChecked(key == self.mode)
 
