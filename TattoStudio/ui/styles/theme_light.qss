@@ -184,3 +184,49 @@ QStatusBar::item { border: 0px; background: transparent; }
 QLabel#ClockLabel { background: transparent; padding-right: 8px; }
 
 QFrame#Toolbar { border: 1px solid #CED4DA; border-radius: 10px; background: palette(base); }
+
+/* ==== Mejora de contraste en checks ==== */
+QCheckBox::indicator {
+  width: 16px; height: 16px;
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 3px;
+  background: transparent;
+}
+QCheckBox::indicator:checked {
+  background: #3BA55D;           /* verde visible */
+  border: 1px solid #3BA55D;
+}
+
+/* ==== QMessageBox look unificado ==== */
+QMessageBox {
+  background: transparent;
+}
+QMessageBox QLabel {
+  background: transparent;
+  font-size: 10.5pt;
+}
+QMessageBox QPushButton {
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 10px;
+}
+QMessageBox QPushButton:hover {
+  opacity: .95;
+}
+
+/* ----- QMessageBox look unificado ----- */
+QMessageBox {
+  background: #ffffff;
+  border: 1px solid #dcdfe6;
+  border-radius: 10px;
+}
+QMessageBox QLabel {
+  color: #222;
+  background: transparent;
+}
+
+/* Redondear sólo el Cancel que marcamos con la propiedad */
+QPushButton#GhostSmall[ctaLike="true"] {
+  border-radius: 18px;
+  padding: 0 16px;
+}

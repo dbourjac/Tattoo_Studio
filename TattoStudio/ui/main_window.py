@@ -1,4 +1,3 @@
-# ui/main_window.py
 from pathlib import Path
 import json
 
@@ -6,7 +5,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton,
-    QFrame, QStatusBar, QStackedWidget, QSizePolicy, QDialog, QMessageBox
+    QFrame, QStatusBar, QStackedWidget, QSizePolicy, QDialog
 )
 
 from ui.widgets.user_panel import PanelUsuario
@@ -110,14 +109,14 @@ class MainWindow(QMainWindow):
         self.user_panel = PanelUsuario(self)
         self.user_panel.cambiar_usuario.connect(self.solicitar_switch_user.emit)
         self.user_panel.cambiar_tema.connect(self._on_toggle_theme)
-        self.solicitar_switch_user.connect(self._switch_user)  # ← ahora sí hacemos el cambio de usuario
+        self.solicitar_switch_user.connect(self._switch_user)  # ← cambio de usuario
 
         # =========================
         #  Stack de páginas
         # =========================
         self.stack = QStackedWidget()
 
-        # Portada (con nombre real del estudio)
+        # Portada
         self.studio_page = StudioPage(studio_name="TattooStudio")
         self.stack.addWidget(self.studio_page)                 # idx 0
 
@@ -130,15 +129,25 @@ class MainWindow(QMainWindow):
         self.idx_clientes    = self.stack.addWidget(self.clients_page)
         self.client_detail   = ClientDetailPage()
         self.idx_cliente_det = self.stack.addWidget(self.client_detail)
-        self.client_detail.back_to_list.connect(lambda: self._ir(self.idx_clientes))
+
+        # Señales: volver y refrescar tras cambios (guardar/archivar/eliminar)
+        self.client_detail.back_to_list.connect(self._show_clients_and_refresh)
+        self.client_detail.cliente_cambiado.connect(self._refresh_clients_table)
 
         # Staff
         self.staff_page     = StaffPage()
         self.idx_staff      = self.stack.addWidget(self.staff_page)
         self.staff_detail   = StaffDetailPage()
         self.idx_staff_det  = self.stack.addWidget(self.staff_detail)
-        self.idx_staff_new  = self.stack.addWidget(make_simple_page("Nuevo staff"))
-        self.staff_detail.back_requested.connect(lambda: self._ir(self.idx_staff))
+        self.idx_staff_new  = self.stack.addWidget(make_simple_page("Nuevo staff"))  # (placeholder opcional)
+
+        # Abrir ficha (ver/editar) y alta en modo "nuevo"
+        self.staff_page.agregar_staff.connect(self._open_staff_create)
+        self.staff_page.abrir_staff.connect(self._open_staff_detail)
+
+        # Navegación y refrescos tras acciones
+        self.staff_detail.back_requested.connect(self._back_to_staff_list)
+        self.staff_detail.staff_saved.connect(self._refresh_staff_list)
 
         # Reportes
         self.reports_page = ReportsPage()
@@ -168,8 +177,7 @@ class MainWindow(QMainWindow):
         self.idx_inv_entry    = self.stack.addWidget(make_simple_page("Nueva entrada"))
         self.idx_inv_adjust   = self.stack.addWidget(make_simple_page("Ajuste de inventario"))
 
-        # Nuevo cliente (mantengo la página en el stack, pero ya NO se navega a ella;
-        # ahora se abre como popup con QDialog)
+        # Nuevo cliente (existe en stack pero se usa como POPUP)
         self.new_client_page = NewClientPage()
         self.idx_nuevo_cliente = self.stack.addWidget(self.new_client_page)
         self.new_client_page.volver_atras.connect(lambda: self._ir(self.idx_clientes))
@@ -182,14 +190,8 @@ class MainWindow(QMainWindow):
         self.studio_page.ir_portafolios.connect(lambda: self._ir(self._ensure_portfolios_page()))
 
         # Clients wiring
-        # Antes navegaba a idx_nuevo_cliente; ahora abre POPUP:
         self.clients_page.crear_cliente.connect(self._abrir_nuevo_cliente_popup)
         self.clients_page.abrir_cliente.connect(self._open_client_detail)
-
-        # Staff wiring
-        self.staff_page.agregar_staff.connect(lambda: self._ir(self.idx_staff_new))
-        self.staff_page.abrir_staff.connect(self._open_staff_detail)
-        self.staff_page.abrir_portafolio.connect(self._open_staff_portfolio)
 
         # =========================
         #  Topbar → navegación
@@ -207,7 +209,7 @@ class MainWindow(QMainWindow):
         # =========================
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage("Ver. 0.1.3 | Último respaldo —")
+        status.showMessage("Ver. 0.1.5 | Último respaldo —")
 
         # =========================
         #  Layout raíz
@@ -231,12 +233,10 @@ class MainWindow(QMainWindow):
         # =========================
         dlg = LoginDialog(self)
         if dlg.exec_() != QDialog.Accepted or not dlg.user:
-            # Usuario canceló o no hay user -> cerrar app
             self.close()
             return
 
         set_current_user(dlg.user)  # guardar sesión actual (id, role, artist_id)
-        # Pintar nombre (y rol) en el botón de usuario
         try:
             self.btn_user.setText(f"{dlg.user.get('username', 'Usuario')} ({dlg.user.get('role', '-')})")
         except Exception:
@@ -303,7 +303,7 @@ class MainWindow(QMainWindow):
         Reglas mínimas:
           - admin: todo
           - assistant: Estudio, Agenda, Clientes (y subpáginas), Reportes
-          - artist: Estudio, Agenda, Reportes (solo su data)
+          - artist: Estudio, Agenda, Reportes + Clientes (vista/detalle)
         """
         u = get_current_user() or {}
         role = u.get("role", "admin")
@@ -322,8 +322,9 @@ class MainWindow(QMainWindow):
         elif role == "assistant":
             allowed |= {self.idx_clientes, self.idx_cliente_det, self.idx_nuevo_cliente}
         elif role == "artist":
-            # Solo lo básico; sin clientes/staff/inventario
-            pass
+            # Acceso de lectura a Clientes (lista + detalle)
+            allowed |= {self.idx_clientes, self.idx_cliente_det}
+            # (El popup de “Nuevo Cliente” se maneja fuera del stack.)
 
         return allowed
 
@@ -335,12 +336,46 @@ class MainWindow(QMainWindow):
         role = u.get("role", "admin")
 
         # Visibilidad de botones de la topbar
-        self.btn_clients.setVisible(role in ("admin", "assistant"))
-        self.btn_staff.setVisible(role == "admin")
-        self.btn_forms.setVisible(role == "admin")  # Inventario solo admin (ajústalo si quieres)
+        self.btn_clients.setVisible(role in ("admin", "assistant", "artist"))
+        self.btn_staff.setVisible(role in ("admin", "assistant", "artist"))
+        self.btn_forms.setVisible(role == "admin")  # Inventario solo admin
 
         # Guardamos el set de páginas permitidas para validarlo en _ir
-        self._allowed_idx = self._allowed_indices_for_role()
+        def _allowed_indices_for_role(self):
+            """
+            Devuelve el conjunto de índices de la stack permitidos para el rol actual.
+            - admin: todo
+            - assistant: Estudio, Agenda, Clientes (y subpáginas), Staff (ver/detalle), Reportes
+            - artist: Estudio, Agenda, Clientes (ver/detalle), Staff (ver/detalle), Reportes
+            """
+            u = get_current_user() or {}
+            role = u.get("role", "admin")
+            allowed = {0, self.idx_agenda, self.idx_reportes}
+
+            if role == "admin":
+                allowed |= {
+                    self.idx_clientes, self.idx_cliente_det, self.idx_nuevo_cliente,
+                    self.idx_staff, self.idx_staff_det, self.idx_staff_new,
+                    self.idx_inventory, self.idx_inv_items, self.idx_inv_detail,
+                    self.idx_inv_moves, self.idx_inv_new_item, self.idx_inv_entry, self.idx_inv_adjust,
+                }
+                if hasattr(self, "idx_cash"): allowed.add(self.idx_cash)
+                if hasattr(self, "idx_portafolios"): allowed.add(self.idx_portafolios)
+
+            elif role == "assistant":
+                allowed |= {
+                    self.idx_clientes, self.idx_cliente_det, self.idx_nuevo_cliente,
+                    self.idx_staff, self.idx_staff_det,
+                }
+
+            elif role == "artist":
+                allowed |= {
+                    self.idx_clientes, self.idx_cliente_det,
+                    self.idx_staff, self.idx_staff_det,
+                }
+
+            return allowed
+
 
     def _is_allowed_index(self, idx: int) -> bool:
         try:
@@ -404,11 +439,25 @@ class MainWindow(QMainWindow):
     def _open_staff_detail(self, staff: dict) -> None:
         self.staff_detail.load_staff(staff)
         self._ir(self.idx_staff_det)
+        self.staff_detail.staff_saved.connect(self._on_staff_saved)
+        self.staff_detail.back_requested.connect(self._back_to_staff_list)
 
     def _open_staff_portfolio(self, staff: dict) -> None:
         self.staff_detail.load_staff(staff)
         self.staff_detail.go_to_portfolio()
         self._ir(self.idx_staff_det)
+
+    def _on_staff_saved(self):
+        # Refresca la lista de staff y vuelve a la página de listado
+        try:
+            # si tu StaffPage expone este método
+            self.staff_page.reload_from_db()
+        except Exception:
+            # fallback: si el método se llama distinto
+            if hasattr(self.staff_page, "refresh"):
+                self.staff_page.refresh()
+        self._back_to_staff_list()
+
 
     # ====== Nuevo cliente como POPUP + refresco inmediato ======
     def _abrir_nuevo_cliente_popup(self):
@@ -418,14 +467,13 @@ class MainWindow(QMainWindow):
 
         page = NewClientPage()
         page.volver_atras.connect(dlg.reject)
-        # FIX: usar el atributo correcto
         page.cliente_creado.connect(lambda _id: self.clients_page.reload_from_db_and_refresh(keep_page=False))
 
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(page)
 
-        dlg.resize(900, 700)  # opcional
+        dlg.resize(900, 700)
         dlg.exec_()
 
     def _on_cliente_creado(self, cid: int):
@@ -434,8 +482,19 @@ class MainWindow(QMainWindow):
             self.clients_page.reload_from_db_and_refresh(keep_page=True)
         except Exception:
             pass
-        # Navega (por si estabas en otro lado)
         self._ir(self.idx_clientes)
+
+    # ====== refrescos de Clientes ======
+    def _show_clients_and_refresh(self):
+        self._refresh_clients_table()
+        self._ir(self.idx_clientes)
+
+    def _refresh_clients_table(self):
+        try:
+            # Método implementado en ClientsPage para recargar datos desde BD
+            self.clients_page.reload_from_db_and_refresh(keep_page=True)
+        except Exception:
+            pass
 
     # Cambio de usuario (desde PanelUsuario)
     def _switch_user(self):
@@ -463,6 +522,28 @@ class MainWindow(QMainWindow):
             self.user_panel.show()
         else:
             self.user_panel.hide()
+# ====== Staff: helpers de navegación/refresco ======
+    def _open_staff_create(self):
+        """Abrir StaffDetail en modo 'nuevo usuario'."""
+        self.staff_detail.start_create_mode()
+        self._ir(self.idx_staff_det)
+
+    def _open_staff_detail(self, staff: dict):
+        """Abrir StaffDetail cargando desde BD el usuario elegido."""
+        self.staff_detail.load_staff(staff)
+        self._ir(self.idx_staff_det)
+
+    def _back_to_staff_list(self):
+        """Volver a la lista de Staff refrescándola."""
+        self._refresh_staff_list()
+        self._ir(self.idx_staff)
+
+    def _refresh_staff_list(self):
+        """Recarga StaffPage desde BD (seguro ante errores)."""
+        try:
+            self.staff_page.reload_from_db_and_refresh()
+        except Exception:
+            pass
 
     def mousePressEvent(self, event):
         if self.user_panel.isVisible() and not self.user_panel.geometry().contains(event.globalPos()):

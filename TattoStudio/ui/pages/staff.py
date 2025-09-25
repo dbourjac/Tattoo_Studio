@@ -1,4 +1,7 @@
-# ui/pages/staff.py
+from __future__ import annotations
+
+from typing import List, Dict
+
 from PyQt5.QtCore import Qt, pyqtSignal, QSize, QRect, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QColor
 from PyQt5.QtWidgets import (
@@ -6,10 +9,18 @@ from PyQt5.QtWidgets import (
     QComboBox, QScrollArea, QFrame, QSizePolicy, QSpacerItem, QLayout, QStyle
 )
 
+# BD
+from sqlalchemy.orm import Session
+from data.db.session import SessionLocal
+from data.models.user import User
+from data.models.artist import Artist
+
+# Sesión actual (para RBAC)
+from services.contracts import get_current_user
+
+
 # ---------------------------
 # FlowLayout (wrap auto)
-# Basado en el patrón clásico de Qt: distribuye widgets en filas y hace wrap
-# según ancho disponible. Esto evita huecos feos del grid fijo.
 # ---------------------------
 class FlowLayout(QLayout):
     def __init__(self, parent=None, margin=0, hspacing=12, vspacing=12):
@@ -92,7 +103,6 @@ class FlowLayout(QLayout):
 
             nextX = x + w + hspace
             if nextX - hspace > effective_rect.right() and line_height > 0:
-                # nueva línea
                 x = effective_rect.x()
                 y = y + line_height + vspace
                 nextX = x + w + hspace
@@ -107,17 +117,19 @@ class FlowLayout(QLayout):
         return total_height
 
 
+def _role_text(role: str) -> str:
+    return {"admin": "Admin", "assistant": "Asistente", "artist": "Tatuador"}.get(role, role)
+
+
 class StaffPage(QWidget):
     """
-    Staff:
-      - Toolbar 1: Agregar staff | Importar CSV | Exportar CSV
-      - Toolbar 2: Buscar + filtros (Rol/Estado/Orden)
-      - Cards en FlowLayout (wrap) — sin paginación
-      - 5 dummies para demo
+    Staff (conectado a BD):
+      - Toolbar (solo admin): Agregar staff | Importar/Exportar (disabled)
+      - Filtros: Buscar + rol + estado + orden
+      - Cards en FlowLayout (wrap), sin paginación
     """
-    agregar_staff = pyqtSignal()
-    abrir_staff = pyqtSignal(dict)
-    abrir_portafolio = pyqtSignal(dict)
+    agregar_staff = pyqtSignal()       # MainWindow abrirá el detalle en modo “nuevo”
+    abrir_staff = pyqtSignal(dict)     # Emite diccionario compacto del usuario
 
     def __init__(self):
         super().__init__()
@@ -133,7 +145,7 @@ class StaffPage(QWidget):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(12)
 
-        # ========================= Toolbar superior =========================
+        # ========================= Toolbar superior (solo admin) =========================
         bar_top = QFrame()
         bar_top.setObjectName("Toolbar")
         bar_top_l = QHBoxLayout(bar_top)
@@ -148,18 +160,16 @@ class StaffPage(QWidget):
 
         bar_top_l.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
 
-        self.btn_import = QPushButton("Importar CSV")
-        self.btn_import.setObjectName("GhostSmall")
-        self.btn_import.setEnabled(False)
-        self.btn_export = QPushButton("Exportar CSV")
-        self.btn_export.setObjectName("GhostSmall")
-        self.btn_export.setEnabled(False)
+        self.btn_import = QPushButton("Importar CSV");  self.btn_import.setObjectName("GhostSmall"); self.btn_import.setEnabled(False)
+        self.btn_export = QPushButton("Exportar CSV");  self.btn_export.setObjectName("GhostSmall"); self.btn_export.setEnabled(False)
         bar_top_l.addWidget(self.btn_import)
         bar_top_l.addWidget(self.btn_export)
 
         root.addWidget(bar_top)
+        # guardamos referencia para RBAC
+        self._admin_toolbar = bar_top
 
-        # ========================= Toolbar filtros =========================
+        # ========================= Toolbar filtros (visible para todos) ==================
         bar_filters = QFrame()
         bar_filters.setObjectName("Toolbar")
         f = QHBoxLayout(bar_filters)
@@ -167,7 +177,7 @@ class StaffPage(QWidget):
         f.setSpacing(8)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Buscar por nombre, rol o especialidad…")
+        self.search.setPlaceholderText("Buscar por nombre/usuario, rol o artista…")
         self.search.textChanged.connect(self._on_search)
         f.addWidget(self.search, stretch=1)
 
@@ -175,9 +185,9 @@ class StaffPage(QWidget):
         lbl_est = QLabel("Estado:"); lbl_est.setStyleSheet("background: transparent;")
         lbl_ord = QLabel("Ordenar por:"); lbl_ord.setStyleSheet("background: transparent;")
 
-        self.cbo_role = QComboBox(); self.cbo_role.addItems(["Todos", "Tatuador", "Asistente", "Manager"])
+        self.cbo_role = QComboBox(); self.cbo_role.addItems(["Todos", "Admin", "Asistente", "Tatuador"])
         self.cbo_role.currentTextChanged.connect(self._on_filter_change)
-        self.cbo_state = QComboBox(); self.cbo_state.addItems(["Todos", "Activo", "Vacaciones", "Archivado"])
+        self.cbo_state = QComboBox(); self.cbo_state.addItems(["Todos", "Activo", "Inactivo"])
         self.cbo_state.currentTextChanged.connect(self._on_filter_change)
         self.cbo_order = QComboBox(); self.cbo_order.addItems(["A–Z", "Rol"])
         self.cbo_order.currentTextChanged.connect(self._on_order_change)
@@ -193,42 +203,82 @@ class StaffPage(QWidget):
         self.scroll.setFrameShape(QFrame.NoFrame)
 
         host = QWidget()
-        # FlowLayout compactito (menos huecos y tarjetas más grandes)
         self.flow = FlowLayout(host, margin=0, hspacing=16, vspacing=16)
         host.setLayout(self.flow)
         self.scroll.setWidget(host)
         root.addWidget(self.scroll, stretch=1)
 
-        # ---- data demo (5 dummies) ----
-        self._seed_mock()
+        # Carga inicial desde BD
+        self._all: List[Dict] = []
+        self.reload_from_db_and_refresh()
+
+        # Aplica RBAC inicial de la toolbar (y también en showEvent)
+        self._apply_toolbar_rbac()
+
+    # ----------------------- RBAC toolbar -----------------------
+    def _apply_toolbar_rbac(self):
+        """Muestra/oculta toda la barra superior según el rol actual."""
+        cu = get_current_user() or {}
+        is_admin = (cu.get("role") == "admin")
+
+        # barra completa solo para admin
+        self._admin_toolbar.setVisible(is_admin)
+
+        # y por claridad, también los botones (aunque estén dentro)
+        self.btn_new.setVisible(is_admin)
+        self.btn_import.setVisible(is_admin)
+        self.btn_export.setVisible(is_admin)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        # Al entrar a la vista (o cambiar de usuario) reevalúa la toolbar
+        self._apply_toolbar_rbac()
+
+    # ----------------------- BD -----------------------
+    def _load_from_db(self) -> List[Dict]:
+        """
+        Devuelve una lista de dicts con los campos necesarios para pintar las cards.
+        """
+        rows: List[Dict] = []
+        with SessionLocal() as db:  # type: Session
+            # LEFT JOIN para traer el nombre del artista si aplica
+            q = (
+                db.query(
+                    User.id, User.username, User.role, User.is_active, User.artist_id,
+                    Artist.name.label("artist_name")
+                )
+                .outerjoin(Artist, Artist.id == User.artist_id)
+            )
+            for (uid, username, role, is_active, artist_id, artist_name) in q.all():
+                nombre_visible = artist_name if (role == "artist" and artist_name) else username
+                rows.append({
+                    "id": uid,
+                    "username": username,
+                    "nombre": nombre_visible or username,
+                    "rol": _role_text(role),
+                    "role_raw": role,
+                    "estado": "Activo" if is_active else "Inactivo",
+                    "is_active": bool(is_active),
+                    "artist_id": artist_id,
+                    "artist_name": artist_name or "—",
+                })
+        return rows
+
+    def reload_from_db_and_refresh(self):
+        self._all = self._load_from_db()
         self._refresh()
 
-    # ----------------------- datos mock -----------------------
-    def _seed_mock(self):
-        # Solo 5 dummies
-        self._all = [
-            {"id": 1, "nombre": "Dylan Bourjac", "rol": "Manager",  "especialidades": ["Blackwork", "Linework"],
-             "estado": "Activo", "disp": "L–S 11:00–19:00", "bio": "Fundador y tatuador senior."},
-            {"id": 2, "nombre": "Jesus Esquer",   "rol": "Tatuador", "especialidades": ["Realismo", "Sombras"],
-             "estado": "Activo", "disp": "M–S 12:00–20:00", "bio": "Realismo en negro y gris."},
-            {"id": 3, "nombre": "Pablo Velasquez",    "rol": "Tatuador", "especialidades": ["Tradicional", "Color"],
-             "estado": "Vacaciones", "disp": "L–S 10:00–18:00", "bio": "Old school y color vibrante."},
-            {"id": 4, "nombre": "Alex Chavez",    "rol": "Tatuador", "especialidades": ["Anime", "Neo-trad"],
-             "estado": "Activo", "disp": "J–D 12:00–20:00", "bio": "Anime y neotrad en color."},
-            {"id": 5, "nombre": "Jenni Rivera",    "rol": "Asistente","especialidades": ["Recepción", "Inventario"],
-             "estado": "Activo", "disp": "M–D 11:00–19:00", "bio": "Front desk y proveedores."},
-        ]
-
     # ----------------------- filtrado/orden -----------------------
-    def _apply_filters(self):
+    def _apply_filters(self) -> List[Dict]:
         txt = self.search_text.lower().strip()
 
-        def match(s):
+        def match(s: Dict) -> bool:
             if txt:
                 if not (
                     txt in s["nombre"].lower()
+                    or txt in s["username"].lower()
                     or txt in s["rol"].lower()
-                    or any(txt in e.lower() for e in s["especialidades"])
+                    or (s.get("artist_name") and txt in s["artist_name"].lower())
                 ):
                     return False
             if self.filter_role != "Todos" and s["rol"] != self.filter_role:
@@ -258,8 +308,7 @@ class StaffPage(QWidget):
             self.flow.addWidget(card)
 
     # ----------------------- card -----------------------
-    def _make_card(self, s: dict) -> QFrame:
-        # Card más grande: se ve “pro”
+    def _make_card(self, s: Dict) -> QFrame:
         CARD_W = 520
 
         card = QFrame()
@@ -292,29 +341,24 @@ class StaffPage(QWidget):
         row_meta.addWidget(role); row_meta.addWidget(state); row_meta.addStretch(1)
         col.addLayout(row_meta)
 
-        esp = QLabel(" · ".join(s["especialidades"]) if s["especialidades"] else "—")
-        esp.setStyleSheet("background: transparent; color:#6C757D;")
-        col.addWidget(esp)
-
-        disp = QLabel(s["disp"])
-        disp.setStyleSheet("background: transparent; color:#6C757D;")
-        col.addWidget(disp)
+        # Si es artista, muestra el username debajo; si no, muestra “—”
+        extra = QLabel(s["username"] if s["role_raw"] == "artist" else "—")
+        extra.setStyleSheet("background: transparent; color:#6C757D;")
+        col.addWidget(extra)
 
         lay.addLayout(col, stretch=1)
 
-        # Acciones (estilo GhostSmall para consistencia)
+        # Acciones
         actions = QVBoxLayout(); actions.setSpacing(8)
         btn_profile = QPushButton("Ver perfil"); btn_profile.setObjectName("GhostSmall")
         btn_profile.clicked.connect(lambda: self.abrir_staff.emit(s))
-        btn_port = QPushButton("Portafolio"); btn_port.setObjectName("GhostSmall")
-        btn_port.clicked.connect(lambda: self.abrir_portafolio.emit(s))
-        actions.addWidget(btn_profile); actions.addWidget(btn_port); actions.addStretch(1)
+        actions.addWidget(btn_profile); actions.addStretch(1)
         lay.addLayout(actions)
 
         return card
 
     def _make_avatar_pixmap(self, size: int, nombre: str) -> QPixmap:
-        initials = "".join([p[0].upper() for p in nombre.split()[:2]])
+        initials = "".join([p[0].upper() for p in nombre.split()[:2]]) or "?"
         pm = QPixmap(size, size); pm.fill(Qt.transparent)
         p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing)
         p.setBrush(QColor("#d1d5db"))  # círculo claro (se ve bien en ambos temas)

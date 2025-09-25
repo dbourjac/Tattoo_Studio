@@ -236,3 +236,96 @@ QFrame#Toolbar {
   border: 1px solid #495057; /* mismo borde que dark */
   border-radius: 10px;
 }
+
+/* ==== Mejora de contraste en checks ==== */
+QCheckBox::indicator {
+  width: 16px; height: 16px;
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 3px;
+  background: transparent;
+}
+QCheckBox::indicator:checked {
+  background: #3BA55D;           /* verde visible */
+  border: 1px solid #3BA55D;
+}
+
+/* ==== QMessageBox look unificado ==== */
+QMessageBox {
+  background: transparent;
+}
+QMessageBox QLabel {
+  background: transparent;
+  font-size: 10.5pt;
+}
+QMessageBox QPushButton {
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 10px;
+}
+QMessageBox QPushButton:hover {
+  opacity: .95;
+}
+
+/* QMessageBox con mismo fondo del tema */
+QMessageBox {
+  background: palette(window);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+}
+QMessageBox QLabel {
+  color: palette(window-text);
+  background: transparent;
+}
+
+/* Redondear sólo el Cancel que marcamos con la propiedad */
+QPushButton#GhostSmall[ctaLike="true"] {
+  border-radius: 18px;        /* mismo radio que CTA */
+  padding: 0 16px;            /* mismo padding horizontal */
+}
+
+/* ============ DARK THEME PATCHES ============ */
+
+/* Inputs más altos (sin cambiar el look) */
+QLineEdit, QComboBox, QTextEdit {
+  min-height: 40px;
+}
+
+/* Resaltado de campos inválidos (propiedad [invalid="true"] en widgets) */
+QLineEdit[invalid="true"], QComboBox[invalid="true"] {
+  border: 1px solid #ff6b6b;
+  background: rgba(255, 107, 107, 0.07);
+}
+
+/* Checkboxes más visibles */
+QCheckBox::indicator {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid #7b8190;
+  background: #1f232b;
+}
+QCheckBox::indicator:hover {
+  border-color: #a8b3c5;
+}
+QCheckBox::indicator:checked {
+  background: #3b82f6;          /* azul visible */
+  border: 1px solid #3b82f6;
+}
+
+/* Cancelar con el MISMO redondeado que CTA (marcado con propiedad ctaLike) */
+QPushButton#GhostSmall[ctaLike="true"] {
+  border-radius: 18px;           /* empata con CTA pill */
+  padding: 0 16px;
+  min-height: 44px;
+}
+
+/* QMessageBox con fondo del tema */
+QMessageBox {
+  background: palette(window);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+}
+QMessageBox QLabel {
+  color: palette(window-text);
+  background: transparent;
+}

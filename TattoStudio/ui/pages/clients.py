@@ -3,20 +3,22 @@ from __future__ import annotations
 # ============================================================
 # clients.py — Lista de clientes (conexión real a BD + RBAC)
 #
-# Cambios:
-# - Contacto: preferimos Teléfono + @instagram; si falta cualquiera, entra email como fallback.
-# - Artista: si no hay próxima/última cita, usamos preferred_artist_id.
-# - Método público reload_from_db_and_refresh() (ya existía) para refresco inmediato.
+# Cambios en esta entrega:
+# - Columna "Etiquetas" eliminada → 5 columnas: Cliente, Contacto, Artista, Próxima cita, Estado.
+# - Placeholder del buscador actualizado: incluye Instagram.
+# - Paginación visual eliminada: se implementa "lista infinita" (lazy load) en scroll.
+# - Acciones rápidas con menú contextual: Abrir ficha, Copiar teléfono, Copiar email, Abrir Instagram.
+# - Contacto: preferimos Tel + @instagram; si falta IG, se usa email como fallback.
 # ============================================================
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QPoint
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QSpacerItem, QSizePolicy, QFrame, QMessageBox
+    QFrame, QMessageBox, QMenu, QApplication
 )
 
 # DB & modelos
@@ -40,14 +42,17 @@ class ClientsPage(QWidget):
     def __init__(self):
         super().__init__()
 
-        # Estado de UI / datos
-        self.page_size = 10
-        self.current_page = 1
+        # Estado de datos
         self.search_text = ""
         self.order_by = "A–Z"
 
-        # Dataset actual (cada item es un dict listo para render)
+        # Dataset completo y filtrado
         self._all: List[Dict[str, Any]] = []
+        self._filtered: List[Dict[str, Any]] = []
+
+        # Lazy load
+        self._batch_size = 50
+        self._rendered_rows = 0
 
         # ===== Root =====
         root = QVBoxLayout(self)
@@ -89,7 +94,7 @@ class ClientsPage(QWidget):
         filters.setSpacing(8)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Buscar por nombre, teléfono o correo…")
+        self.search.setPlaceholderText("Buscar por nombre, teléfono, correo o Instagram…")
         self.search.textChanged.connect(self._on_search)
         filters.addWidget(self.search, stretch=1)
 
@@ -104,18 +109,6 @@ class ClientsPage(QWidget):
         self.cbo_order.setFixedHeight(36)
         filters.addWidget(self.cbo_order)
 
-        # Tamaño de página
-        lbl_show = QLabel("Mostrar:")
-        lbl_show.setStyleSheet("background: transparent;")
-        filters.addWidget(lbl_show)
-
-        self.cbo_page = QComboBox()
-        self.cbo_page.addItems(["10", "25", "50", "100"])
-        self.cbo_page.setCurrentText(str(self.page_size))
-        self.cbo_page.currentTextChanged.connect(self._on_change_page_size)
-        self.cbo_page.setFixedHeight(36)
-        filters.addWidget(self.cbo_page)
-
         root.addLayout(filters)
 
         # ========== Tabla ==========
@@ -125,15 +118,16 @@ class ClientsPage(QWidget):
         tv.setContentsMargins(12, 12, 12, 12)
         tv.setSpacing(8)
 
-        self.table = QTableWidget(0, 6, self)
+        # 5 columnas: Cliente, Contacto, Artista, Próxima cita, Estado
+        self.table = QTableWidget(0, 5, self)
         self.table.setHorizontalHeaderLabels([
-            "Cliente", "Contacto", "Artista", "Próxima cita", "Etiquetas", "Estado"
+            "Cliente", "Contacto", "Artista", "Próxima cita", "Estado"
         ])
 
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        for col in range(2, 6):
+        header.setSectionResizeMode(0, QHeaderView.Stretch)  # Cliente
+        header.setSectionResizeMode(1, QHeaderView.Stretch)  # Contacto
+        for col in range(2, 5):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
 
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -141,33 +135,19 @@ class ClientsPage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.cellDoubleClicked.connect(self._on_double_click)
 
+        # Menú contextual (acciones rápidas)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._open_context_menu)
+
+        # Lazy load al hacer scroll
+        self.table.verticalScrollBar().valueChanged.connect(self._on_scroll)
+
         tv.addWidget(self.table)
         root.addWidget(table_box, stretch=1)
 
-        # ========== Paginación ==========
-        pager = QHBoxLayout()
-        pager.setSpacing(8)
-
-        self.btn_prev = QPushButton("⟵")
-        self.btn_prev.setObjectName("GhostSmall")
-        self.btn_next = QPushButton("⟶")
-        self.btn_next.setObjectName("GhostSmall")
-
-        self.lbl_page = QLabel("Página 1/1")
-        self.lbl_page.setStyleSheet("background: transparent;")
-
-        self.btn_prev.clicked.connect(self._prev_page)
-        self.btn_next.clicked.connect(self._next_page)
-
-        pager.addWidget(self.btn_prev)
-        pager.addWidget(self.btn_next)
-        pager.addWidget(self.lbl_page)
-        pager.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        root.addLayout(pager)
-
         # Carga inicial desde BD
         self._reload_from_db()
-        self._refresh()
+        self._apply_and_reset_render()
 
     # ---------- Datos ----------
     def _reload_from_db(self) -> None:
@@ -223,18 +203,16 @@ class ClientsPage(QWidget):
                         return dt.strftime("%d %b %H:%M") if dt else "—"
 
                     proxima_str = fmt_dt(getattr(next_session, "start", None))
-                    etiquetas = ""
                     estado = "Activo" if getattr(next_session, "start", None) else "—"
 
-                    # Contacto: prefer Tel + @ig; si falta alguno, usa email como fallback
+                    # Contacto: prefer Tel + @ig; si falta IG, usar email (si no duplicamos)
                     parts: List[str] = []
-                    primary = phone or email  # si no hay phone, usa email
+                    primary = phone or email
                     if primary:
                         parts.append(str(primary))
                     if instagram:
                         parts.append("@" + str(instagram))
                     else:
-                        # si no hay IG, intenta agregar email (si no lo usamos ya)
                         if email and email != primary:
                             parts.append(str(email))
                     contacto_str = "  ·  ".join([p for p in parts if p])[:200]
@@ -247,7 +225,6 @@ class ClientsPage(QWidget):
                         "ig": instagram,
                         "artista": artist_name,
                         "proxima": proxima_str,
-                        "etiquetas": etiquetas,
                         "estado": estado,
                         "_created_at": created_at,
                         "_last_session": getattr(last_session, "start", None),
@@ -261,7 +238,7 @@ class ClientsPage(QWidget):
             QMessageBox.critical(self, "BD", f"Error al cargar clientes: {ex}")
             self._all = []
 
-    # ---------- Filtro/orden/paginación ----------
+    # ---------- Filtro/orden ----------
     def _apply_filters(self) -> List[Dict[str, Any]]:
         txt = self.search_text.lower().strip()
         if txt:
@@ -286,79 +263,94 @@ class ClientsPage(QWidget):
 
         return rows
 
-    def _refresh(self) -> None:
-        rows = self._apply_filters()
+    # ---------- Render lazy ----------
+    def _apply_and_reset_render(self) -> None:
+        self._filtered = self._apply_filters()
+        self._rendered_rows = 0
+        self.table.setRowCount(0)
+        self._append_next_batch()
 
-        total_pages = max(1, (len(rows) + self.page_size - 1) // self.page_size)
-        self.current_page = min(self.current_page, total_pages)
-
-        start = (self.current_page - 1) * self.page_size
-        page_rows = rows[start:start + self.page_size]
-
-        self.table.setRowCount(len(page_rows))
-        for r, c in enumerate(page_rows):
+    def _append_next_batch(self) -> None:
+        if self._rendered_rows >= len(self._filtered):
+            return
+        start = self._rendered_rows
+        end = min(start + self._batch_size, len(self._filtered))
+        self.table.setRowCount(end)
+        for r in range(start, end):
+            c = self._filtered[r]
             it0 = QTableWidgetItem(c["nombre"])
             it0.setData(Qt.UserRole, c["id"])
             self.table.setItem(r, 0, it0)
 
-            self.table.setItem(r, 1, QTableWidgetItem(
-                c.get("contacto") or "  ·  ".join([p for p in [
-                    str(c.get("tel") or "") if c.get("tel") else (str(c.get("email") or "") if c.get("email") else None),
-                    "@" + str(c.get("ig")) if c.get("ig") else (str(c.get("email") or "") if c.get("email") else None),
-                ] if p])
-            ))
+            self.table.setItem(r, 1, QTableWidgetItem(c.get("contacto") or "—"))
             self.table.setItem(r, 2, QTableWidgetItem(c.get("artista") or "—"))
             self.table.setItem(r, 3, QTableWidgetItem(c.get("proxima") or "—"))
-            self.table.setItem(r, 4, QTableWidgetItem(c.get("etiquetas") or ""))
-            self.table.setItem(r, 5, QTableWidgetItem(c.get("estado") or "—"))
+            self.table.setItem(r, 4, QTableWidgetItem(c.get("estado") or "—"))
 
-        self.lbl_page.setText(f"Página {self.current_page}/{total_pages}")
-        self.btn_prev.setEnabled(self.current_page > 1)
-        self.btn_next.setEnabled(self.current_page < total_pages)
+        self._rendered_rows = end
 
     # ---------- Público: refresco inmediato ----------
-    def reload_from_db_and_refresh(self, *, keep_page: bool = False) -> None:
+    def reload_from_db_and_refresh(self, keep_page: bool = False) -> None:
         self._reload_from_db()
-        if not keep_page:
-            self.current_page = 1
-        self._refresh()
+        self._apply_and_reset_render()
 
     # ---------- Eventos UI ----------
     def _on_search(self, text: str):
         self.search_text = text
-        self.current_page = 1
-        self._refresh()
+        self._apply_and_reset_render()
 
     def _on_change_order(self, text: str):
         self.order_by = text
-        self.current_page = 1
-        self._refresh()
-
-    def _on_change_page_size(self, text: str):
-        try:
-            self.page_size = int(text)
-        except ValueError:
-            self.page_size = 10
-        self.current_page = 1
-        self._refresh()
-
-    def _prev_page(self):
-        if self.current_page > 1:
-            self.current_page -= 1
-            self._refresh()
-
-    def _next_page(self):
-        self.current_page += 1
-        self._refresh()
+        self._apply_and_reset_render()
 
     def _on_double_click(self, row: int, col: int):
         item = self.table.item(row, 0)
         if not item:
             return
         cid = item.data(Qt.UserRole)
-        data = next((c for c in self._all if c["id"] == cid), None)
+        data = next((c for c in self._filtered if c["id"] == cid), None)
         if data:
             self.abrir_cliente.emit(data)
+
+    def _on_scroll(self, value: int):
+        sb = self.table.verticalScrollBar()
+        if sb.maximum() - value < 5:  # cerca del fondo
+            self._append_next_batch()
+
+    # ---------- Menú contextual ----------
+    def _open_context_menu(self, pos: QPoint):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        data = self._filtered[row] if row < len(self._filtered) else None
+        if not data:
+            return
+
+        m = QMenu(self)
+        act_open = m.addAction("Abrir ficha")
+        act_copy_phone = m.addAction("Copiar teléfono")
+        act_copy_mail = m.addAction("Copiar correo")
+        ig = data.get("ig")
+        act_open_ig = m.addAction("Abrir Instagram") if ig else None
+
+        chosen = m.exec_(self.table.viewport().mapToGlobal(pos))
+        if not chosen:
+            return
+
+        if chosen == act_open:
+            self.abrir_cliente.emit(data)
+        elif chosen == act_copy_phone:
+            if data.get("tel"):
+                QApplication.clipboard().setText(str(data["tel"]))
+        elif chosen == act_copy_mail:
+            if data.get("email"):
+                QApplication.clipboard().setText(str(data["email"]))
+        elif act_open_ig and chosen == act_open_ig:
+            # abrir perfil IG en navegador
+            import webbrowser
+            handle = str(ig).lstrip("@")
+            webbrowser.open(f"https://instagram.com/{handle}")
 
     # ---------- Acciones Toolbar ----------
     def _on_new_client_clicked(self):

@@ -1,8 +1,3 @@
-"""
-Servicios de Agenda/Sesiones: crear, editar y completar sesiones.
-'Completar' crea una Transaction en la misma transacción de BD.
-"""
-
 from datetime import datetime
 from typing import Optional
 
@@ -71,6 +66,25 @@ def create_session(payload: dict) -> int:
             db.add(s)
             db.flush()  # asigna s.id
             return s.id
+def cancel_session(session_id: int, as_no_show: bool = False) -> None:
+    """
+    Marca la sesión como 'Cancelada'. Si as_no_show=True, antepone una nota para indicarlo.
+    NOTA: El esquema actual no tiene estado 'No-show'; lo representamos como Cancelada + nota.
+    """
+    with SessionLocal() as db:
+        with db.begin():
+            s = db.get(TattooSession, session_id)
+            if not s:
+                raise ValueError("Sesión no encontrada.")
+            if s.status == "Completada":
+                raise ValueError("No puedes cancelar una sesión completada.")
+
+            # Marcar cancelada
+            s.status = "Cancelada"
+            note_tag = "[No-show] " if as_no_show else ""
+            if note_tag:
+                s.notes = (note_tag + (s.notes or "")).strip()
+            db.add(s)
 
 
 # ---------- API: actualizar sesión ----------

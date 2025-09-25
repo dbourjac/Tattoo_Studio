@@ -1,20 +1,11 @@
 from __future__ import annotations
 
-# ============================================================
-# new_client.py — Formulario de Nuevo Cliente (BD real + RBAC)
-#
-# Cambios:
-# - Botón "← Volver" eliminado (se usa como popup; Cancelar/guardar emiten volver_atras).
-# - Guarda preferred_artist_id a partir del combo (lookup por nombre en artists).
-# - Señal cliente_creado(int) para refrescar lista desde MainWindow.
-# - FIX: indentación corregida en _save_client (db.add/commit/refresh).
-# ============================================================
-
 from PyQt5.QtCore import Qt, QDate, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QTabWidget, QGroupBox, QFormLayout,
     QLineEdit, QDateEdit, QComboBox, QCheckBox, QTextEdit, QListWidget,
-    QListWidgetItem, QHBoxLayout, QPushButton, QMessageBox
+    QListWidgetItem, QHBoxLayout, QPushButton, QMessageBox, QSizePolicy,
+    QDialog
 )
 
 # BD / ORM
@@ -29,25 +20,32 @@ from ui.pages.common import ensure_permission
 
 import unicodedata
 
+
 def _norm(s: str) -> str:
-    # quita tildes y baja a casefold
-    return "".join(ch for ch in unicodedata.normalize("NFD", s or "") if unicodedata.category(ch) != "Mn").casefold().strip()
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", s or "")
+        if unicodedata.category(ch) != "Mn"
+    ).casefold().strip()
 
 
 class NewClientPage(QWidget):
     """
-    Formulario (mock→real) de Nuevo Cliente:
-    - Tabs: Identificación & Contacto / Preferencias / Salud / Consentimientos / Emergencia / Notas
+    Formulario de Nuevo Cliente (popup):
+    - Tabs: Identificación / Preferencias / Salud / Consentimientos / Emergencia / Notas
     - Botones al pie: Guardar / Guardar y agendar / Cancelar
     - Señales:
-        * volver_atras()        -> el contenedor (QDialog) cierra
-        * cliente_creado(int)   -> id del cliente insertado en BD
+        * volver_atras()      -> el contenedor (QDialog) cierra
+        * cliente_creado(int) -> id del cliente insertado en BD
     """
     volver_atras = pyqtSignal()
     cliente_creado = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
+
+        # Base alta para evitar compresión
+        self.setMinimumHeight(860)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         # Asegura que todos los QLabel se vean sin recuadro de fondo
         self.setStyleSheet("QLabel { background: transparent; }")
@@ -56,9 +54,11 @@ class NewClientPage(QWidget):
         root.setContentsMargins(24, 24, 16, 16)
         root.setSpacing(12)
 
-        # ---- Título (sin botón volver) ----
+        # ---- Título centrado ----
         title = QLabel("Nuevo cliente")
         title.setObjectName("H1")
+        title.setAlignment(Qt.AlignHCenter)
+        title.setStyleSheet("font-size: 18pt;")
         root.addWidget(title)
 
         # ---- Tabs ----
@@ -78,8 +78,13 @@ class NewClientPage(QWidget):
         self.btn_guardar_agendar = QPushButton("Guardar y agendar"); self.btn_guardar_agendar.setObjectName("CTA")
         self.btn_cancelar = QPushButton("Cancelar"); self.btn_cancelar.setObjectName("GhostSmall")
         for b in (self.btn_guardar, self.btn_guardar_agendar, self.btn_cancelar):
-            b.setMinimumHeight(36)
-            btn_bar.addWidget(b)
+            b.setMinimumHeight(44)
+        self.btn_cancelar.setProperty("ctaLike", True)
+
+        btn_bar.addWidget(self.btn_guardar)
+        btn_bar.addWidget(self.btn_guardar_agendar)
+        btn_bar.addWidget(self.btn_cancelar)
+        self.setLayoutDirection(Qt.LeftToRight)
         root.addLayout(btn_bar)
 
         # Wire de acciones (con gates de permiso en los handlers)
@@ -87,8 +92,20 @@ class NewClientPage(QWidget):
         self.btn_guardar_agendar.clicked.connect(lambda: self._on_guardar(open_schedule=True))
         self.btn_cancelar.clicked.connect(self.volver_atras.emit)
 
-        # Validación mínima para habilitar guardado
+        # Validación mínima + resaltado visual
         self._wire_min_validation()
+
+    # --- Forzar que el QDialog contenedor abra ALTO (sin tocar main_window) ---
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        # Sube por la jerarquía buscando el QDialog contenedor
+        p = self.parentWidget()
+        while p and not isinstance(p, QDialog):
+            p = p.parentWidget()
+        if isinstance(p, QDialog):
+            p.setMinimumSize(980, 960)
+            p.resize(1060, 1000)
+            p.setSizeGripEnabled(True)
 
     # ---------- Tabs ----------
     def _tab_identificacion_contacto(self) -> QWidget:
@@ -243,7 +260,8 @@ class NewClientPage(QWidget):
 
     # ---------- Helpers ----------
     def _wire_min_validation(self):
-        """Habilita los CTAs sólo si: nombre, primer apellido, teléfono y consentimiento informado están completos."""
+        """Habilita los CTAs sólo si: nombre, primer apellido, teléfono y consentimiento informado están completos.
+           Además, marca visualmente los campos requeridos vacíos."""
         def update_enabled():
             obligatorios_ok = bool(self.in_nombres.text().strip()) and \
                               bool(self.in_ap1.text().strip()) and \
@@ -251,6 +269,15 @@ class NewClientPage(QWidget):
                               self.chk_consent_info.isChecked()
             self.btn_guardar.setEnabled(obligatorios_ok)
             self.btn_guardar_agendar.setEnabled(obligatorios_ok)
+
+            # resalta campos vacíos
+            def mark(widget, ok: bool):
+                widget.setProperty("invalid", not ok)
+                widget.style().unpolish(widget); widget.style().polish(widget)
+
+            mark(self.in_nombres, bool(self.in_nombres.text().strip()))
+            mark(self.in_ap1, bool(self.in_ap1.text().strip()))
+            mark(self.in_tel, bool(self.in_tel.text().strip()))
 
         for w in [self.in_nombres, self.in_ap1, self.in_tel]:
             w.textChanged.connect(update_enabled)
@@ -267,6 +294,17 @@ class NewClientPage(QWidget):
         ap2 = self.in_ap2.text().strip()
         full_name = " ".join([p for p in [nombres, ap1, ap2] if p]).strip()
 
+        # Preferencias → serializar como metadatos en notas
+        estilos = [self.lst_estilos.item(i).text() for i in range(self.lst_estilos.count()) if self.lst_estilos.item(i).isSelected()]
+        zonas   = [self.lst_zonas.item(i).text()   for i in range(self.lst_zonas.count())   if self.lst_zonas.item(i).isSelected()]
+        source  = self.cb_origen.currentText()
+        meta_line = ""
+        if estilos or zonas or source:
+            meta_line = f"\nMETA_PREFS|styles={','.join(estilos)};zones={','.join(zonas)};source={source}"
+
+        notes_user = self.txt_notas.toPlainText().strip()
+        notes = (notes_user + meta_line).strip() if (notes_user or meta_line) else None
+
         payload = {
             "name": full_name,
             "phone": self.in_tel.text().strip() or None,
@@ -274,7 +312,7 @@ class NewClientPage(QWidget):
             "instagram": self.in_ig.text().strip() or None,
             "city": self.in_ciudad.text().strip() or None,
             "state": self.in_estado.text().strip() or None,
-            "notes": self.txt_notas.toPlainText().strip() or None,
+            "notes": notes,
             "gender": self.cb_genero.currentText(),
             "birthdate": self.in_fnac.date().toPyDate(),
             "consent_info": bool(self.chk_consent_info.isChecked()),
@@ -300,14 +338,12 @@ class NewClientPage(QWidget):
     def _find_artist_id_by_name(self, db, name: str) -> int | None:
         if not name or _norm(name) == "sin preferencia":
             return None
-
         target = _norm(name).split()[0]  # primer token del combo (ej. "jesus")
         winner_id = None
         for a in db.query(Artist).all():
             full = _norm(getattr(a, "name", "") or "")
             first = (full.split()[0] if full else "")
             if full == _norm(name) or first == target:
-                # elegimos el de menor id para estabilizar
                 aid = getattr(a, "id", None)
                 if aid is not None and (winner_id is None or aid < winner_id):
                     winner_id = aid
@@ -350,7 +386,6 @@ class NewClientPage(QWidget):
             except Exception:
                 pass
 
-        # ✅ FIX: estas líneas deben ejecutarse SIEMPRE (no dentro de un except)
         db.add(obj)
         db.commit()
         db.refresh(obj)
@@ -368,7 +403,7 @@ class NewClientPage(QWidget):
 
         # Validación extra (defensiva)
         if not self.in_nombres.text().strip() or not self.in_ap1.text().strip() or not self.in_tel.text().strip():
-            QMessageBox.warning(self, "Validación", "Faltan datos obligatorios (nombre, primer apellido y teléfono).")
+            QMessageBox.warning(self, "Validación", "Por favor completa los campos obligatorios.")
             return
         if not self.chk_consent_info.isChecked():
             QMessageBox.warning(self, "Consentimiento", "Debes aceptar el consentimiento informado.")
@@ -386,7 +421,7 @@ class NewClientPage(QWidget):
             self._set_buttons_enabled(True)
             return
 
-        # Notificar & UX
+        # Notificar (QMessageBox toma el QSS del tema)
         self.cliente_creado.emit(client_id)
         if open_schedule:
             QMessageBox.information(self, "Cliente creado", "Cliente guardado. Continúa para agendar su cita.")
