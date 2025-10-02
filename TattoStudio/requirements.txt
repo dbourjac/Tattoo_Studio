@@ -1,5 +1,6 @@
 # === Runtime ===
 PyQt5>=5.15,<6
+PyQtChart>=5.15.4
 SQLAlchemy>=2.0,<3
 alembic>=1.13,<2
 python-dotenv>=1.0,<2

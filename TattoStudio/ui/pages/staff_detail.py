@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from pathlib import Path
+from datetime import date, datetime, timezone
+import json
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QDate, pyqtSignal, QEvent, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QColor, QPainterPath
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTabWidget,
-    QTextEdit, QListWidget, QFrame, QLineEdit, QSpacerItem, QSizePolicy,
-    QComboBox, QCheckBox, QMessageBox, QFileDialog, QGridLayout
+    QTextEdit, QListWidget, QFrame, QSizePolicy, QComboBox, QFileDialog,
+    QGridLayout, QDateEdit, QToolButton, QMenu, QSpacerItem, QListWidgetItem,
+    QColorDialog, QApplication, QAction, QDialog, QLineEdit, QPushButton as QBtn, QLabel as QLbl
 )
 
 # BD
@@ -25,7 +28,7 @@ from services.contracts import get_current_user
 from services import auth
 from services.permissions import can
 
-# Elevación (código maestro) para assistant (cambio de foto ajena)
+# Elevación assistant
 from ui.pages.common import request_elevation_if_needed
 
 
@@ -33,560 +36,828 @@ def _role_text(role: str) -> str:
     return {"admin": "Admin", "assistant": "Asistente", "artist": "Tatuador"}.get(role, role)
 
 
+# ===== Menú que NO emite StatusTip (no borra el status bar)
+class NoStatusTipMenu(QMenu):
+    def event(self, ev):
+        if ev.type() == QEvent.StatusTip:
+            return True
+        return super().event(ev)
+
+
+# ===== QLineEdit con menú contextual en español
+class LocalizedLineEdit(QLineEdit):
+    def contextMenuEvent(self, ev):
+        menu = self.createStandardContextMenu()
+        mapping = {
+            "Undo": "Deshacer", "Redo": "Rehacer",
+            "Cut": "Cortar", "Copy": "Copiar", "Paste": "Pegar",
+            "Delete": "Eliminar", "Select All": "Seleccionar todo"
+        }
+        for act in menu.actions():
+            txt = act.text()
+            if txt in mapping:
+                act.setText(mapping[txt])
+        menu.setStyleSheet("""
+            QMenu {
+                background: #2b2f36;
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                padding: 4px;
+            }
+            QMenu::item { padding: 6px 12px; border-radius: 6px; color: #e8eaf0; }
+            QMenu::item:selected { background: rgba(100,180,255,0.18); color: white; }
+        """)
+        menu.exec(ev.globalPos())
+
+
+# ===== Panel frameless/arrastrable para popups
+class FramelessPanel(QDialog):
+    def __init__(self, title: str = "", parent=None):
+        super().__init__(parent)
+        # Sin barra de título + fondo del diálogo realmente transparente
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self._drag: Optional[QPoint] = None
+
+        # El contenedor "Card" ocupa TODO el rectángulo; pinta el fondo y el borde redondeado
+        self.wrap = QFrame(self)
+        self.wrap.setObjectName("Card")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.wrap)
+
+        self.v = QVBoxLayout(self.wrap)
+        self.v.setContentsMargins(14, 14, 14, 14)
+        self.v.setSpacing(10)
+
+        # TODOS los textos sin fondo
+        self.wrap.setStyleSheet("QLabel{background:transparent;}")
+
+        if title:
+            t = QLabel(title)
+            t.setStyleSheet("font-weight:700; font-size:12pt; background:transparent;")
+            self.v.addWidget(t)
+
+    # arrastrable
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag = e.globalPos() - self.frameGeometry().topLeft()
+            e.accept()
+
+    def mouseMoveEvent(self, e):
+        if self._drag and e.buttons() & Qt.LeftButton:
+            self.move(e.globalPos() - self._drag)
+            e.accept()
+
+    def mouseReleaseEvent(self, e):
+        self._drag = None
+        super().mouseReleaseEvent(e)
+
+
 class StaffDetailPage(QWidget):
     back_requested = pyqtSignal()
     staff_saved = pyqtSignal()
-    # staff_deleted = pyqtSignal()  # eliminado de la UX
+
+    _ARTIST_PALETTE = ["#7C3AED", "#0EA5E9", "#10B981", "#F59E0B", "#EF4444",
+                       "#A855F7", "#06B6D4", "#84CC16", "#EAB308", "#F97316"]
 
     def __init__(self):
         super().__init__()
-
         self._user_id: Optional[int] = None
         self._is_new: bool = False
         self._edit_mode: bool = False
+        self._current_is_active: bool = True
+        self._kebab_allowed: bool = False
+        self._block_status_tips: bool = False  # safety extra
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 24, 24, 24)
-        root.setSpacing(12)
+        # ===== LAYOUT PRINCIPAL
+        root = QHBoxLayout(self); root.setContentsMargins(24, 24, 24, 24); root.setSpacing(16)
 
-        # ============== Toolbar superior ==============
-        topbar = QFrame()
-        topbar.setObjectName("Toolbar")
-        tb = QHBoxLayout(topbar)
-        tb.setContentsMargins(12, 8, 12, 8)
-        tb.setSpacing(8)
+        # --------- Izquierda: Tarjeta completa
+        self.card = QFrame(); self.card.setObjectName("Card")
+        self.card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.card.setAttribute(Qt.WA_Hover, True); self.card.setMouseTracking(True)
 
-        self.btn_back = QPushButton("← Volver")
-        self.btn_back.setObjectName("GhostSmall")
-        self.btn_back.clicked.connect(self._on_back_clicked)
-        tb.addWidget(self.btn_back)
+        left = QVBoxLayout(self.card); left.setContentsMargins(14, 8, 14, 14); left.setSpacing(12)
 
-        tb.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        # Barra de color
+        self.color_bar = QFrame(); self.color_bar.setFixedHeight(6)
+        self.color_bar.setStyleSheet("background: transparent; border-radius: 3px;")
+        left.addWidget(self.color_bar)
 
-        self.btn_edit = QPushButton("Editar");     self.btn_edit.setObjectName("GhostSmall")
-        self.btn_save = QPushButton("Guardar");    self.btn_save.setObjectName("CTA")
-        self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("GhostSmall")
-        self.btn_toggle = QPushButton("Desactivar"); self.btn_toggle.setObjectName("GhostSmall")
-        self.btn_password = QPushButton("Cambiar contraseña"); self.btn_password.setObjectName("GhostSmall")
+        # Header
+        head = QHBoxLayout(); head.setSpacing(12)
 
-        self.btn_edit.clicked.connect(self._enter_edit)
-        self.btn_save.clicked.connect(self._save)
-        self.btn_cancel.clicked.connect(self._cancel_edit)
-        self.btn_toggle.clicked.connect(self._toggle_active)
-        self.btn_password.clicked.connect(self._change_password)
+        # Avatar + ✎
+        avatar_col = QVBoxLayout(); avatar_col.setSpacing(0); avatar_col.setContentsMargins(0, 0, 0, 0)
+        self.avatar = QLabel(); self.avatar.setFixedSize(128, 128)
+        self.avatar.setStyleSheet("background: transparent; border-radius:64px;")
+        avatar_col.addWidget(self.avatar, alignment=Qt.AlignTop)
 
-        for b in (self.btn_edit, self.btn_save, self.btn_cancel, self.btn_toggle, self.btn_password):
-            tb.addWidget(b)
-
-        root.addWidget(topbar)
-
-        # ============================== Header Card ==============================
-        header = QFrame()
-        header.setObjectName("Card")
-        hl = QHBoxLayout(header)
-        hl.setContentsMargins(14, 14, 14, 14)
-        hl.setSpacing(14)
-
-        # Columna avatar + acción
-        left_col = QVBoxLayout()
-        left_col.setSpacing(6)
-        self.avatar = QLabel()
-        self.avatar.setFixedSize(96, 96)
-        self.avatar.setStyleSheet("background: transparent;")
-        left_col.addWidget(self.avatar, alignment=Qt.AlignTop)
-
-        self.btn_photo = QPushButton("Cambiar foto")
+        self.btn_photo = QPushButton("✎", self.avatar)
         self.btn_photo.setObjectName("GhostSmall")
-        self.btn_photo.setMinimumHeight(28)
+        self.btn_photo.setToolTip("Cambiar foto")
+        self.btn_photo.setFixedSize(36, 36)
+        self.btn_photo.setStyleSheet("border-radius:18px; background: rgba(0,0,0,0.45); color: white; font-weight:700;")
+        self.btn_photo.hide()
         self.btn_photo.clicked.connect(self._on_change_photo)
-        left_col.addWidget(self.btn_photo)
+        head.addLayout(avatar_col)
 
-        hl.addLayout(left_col)
+        # Nombre + chips
+        name_col = QVBoxLayout(); name_col.setSpacing(6)
+        name_row = QHBoxLayout(); name_row.setSpacing(8)
 
-        # Columna datos
-        col = QVBoxLayout(); col.setSpacing(6)
+        self.color_dot = QLabel(); self.color_dot.setFixedSize(12, 12)
+        self.color_dot.setStyleSheet("border-radius:6px; background: transparent;")
+        name_row.addWidget(self.color_dot, alignment=Qt.AlignVCenter)
+
         self.lbl_name = QLabel("—")
-        self.lbl_name.setStyleSheet("font-weight:700; font-size:16pt; background: transparent;")
-        col.addWidget(self.lbl_name)
+        self.lbl_name.setStyleSheet("font-weight:700; font-size:18pt; background: transparent;")
+        name_row.addWidget(self.lbl_name, stretch=1)
+        name_col.addLayout(name_row)
 
-        badges = QHBoxLayout(); badges.setSpacing(10)
-        self.lbl_role  = QLabel("—");  self.lbl_role.setStyleSheet("color:#6C757D; background: transparent;")
-        self.lbl_state = QLabel("—");  self.lbl_state.setStyleSheet("color:#6C757D; background: transparent;")
-        badges.addWidget(self.lbl_role); badges.addWidget(self.lbl_state); badges.addStretch(1)
-        col.addLayout(badges)
+        chips = QHBoxLayout(); chips.setSpacing(8)
+        self.lbl_role_chip = QLabel("—"); self.lbl_state_chip = QLabel("—")
+        for c in (self.lbl_role_chip, self.lbl_state_chip):
+            c.setStyleSheet("background: transparent; padding:2px 8px; border-radius:8px;")
+        chips.addWidget(self.lbl_role_chip); chips.addWidget(self.lbl_state_chip); chips.addStretch(1)
+        name_col.addLayout(chips)
+        head.addLayout(name_col, stretch=1)
 
-        hl.addLayout(col, stretch=1)
-        root.addWidget(header)
+        # Kebab
+        self.btn_kebab = QToolButton(); self.btn_kebab.setText("···"); self.btn_kebab.setObjectName("GhostSmall")
+        self.btn_kebab.setStyleSheet("""
+            QToolButton { padding: 2px 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; }
+            QToolButton:hover { border-color: rgba(255,255,255,0.18); }
+        """)
+        self.btn_kebab.setPopupMode(QToolButton.InstantPopup); self.btn_kebab.hide()
 
-        # ============================== Tabs ==============================
-        self.tabs = QTabWidget()
-        root.addWidget(self.tabs, stretch=1)
+        self.menu_kebab = NoStatusTipMenu(self)
+        self.menu_kebab.setStyleSheet("""
+            QMenu { background:#2b2f36; border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:4px; }
+            QMenu::item { padding:6px 12px; border-radius:6px; color:#e8eaf0; }
+            QMenu::item:selected { background:rgba(100,180,255,0.18); color:white; }
+        """)
+        self.act_edit = self.menu_kebab.addAction("Editar");  self.act_edit.triggered.connect(self._enter_edit)
+        self.act_toggle = self.menu_kebab.addAction("Desactivar"); self.act_toggle.triggered.connect(self._toggle_active)
+        self.act_password = self.menu_kebab.addAction("Cambiar contraseña"); self.act_password.triggered.connect(self._change_password)
+        self.act_color = self.menu_kebab.addAction("Color"); self.act_color.triggered.connect(self._change_color)
+        self.menu_kebab.aboutToShow.connect(lambda: setattr(self, "_block_status_tips", True))
+        self.menu_kebab.aboutToHide.connect(lambda: setattr(self, "_block_status_tips", False))
+        self.btn_kebab.setMenu(self.menu_kebab)
 
-        self.tab_perfil = QWidget(); self._mk_perfil(self.tab_perfil)
-        self.tab_disp   = QWidget(); self._mk_text(self.tab_disp, "Disponibilidad semanal (placeholder)")
-        self.tab_port   = QWidget(); self._mk_list(self.tab_port, [])
-        self.tab_citas  = QWidget(); self._mk_list(self.tab_citas, [])
-        self.tab_docs   = QWidget(); self._mk_text(self.tab_docs, "Documentos (placeholder)")
-        self.tab_comm   = QWidget(); self._mk_text(self.tab_comm, "Comisiones (placeholder)")
+        a_col = QVBoxLayout(); a_col.addWidget(self.btn_kebab, alignment=Qt.AlignRight | Qt.AlignTop)
+        head.addLayout(a_col)
+        left.addLayout(head)
 
-        self.tabs.addTab(self.tab_perfil, "Perfil")
-        self.tabs.addTab(self.tab_disp,   "Disponibilidad")
-        self.tabs.addTab(self.tab_port,   "Portafolio")
-        self.tabs.addTab(self.tab_citas,  "Citas")
-        self.tabs.addTab(self.tab_docs,   "Documentos")
-        self.tabs.addTab(self.tab_comm,   "Comisiones")
-
-        self._apply_rbac_to_buttons(view_only=True)
-
-    # ============================ API pública ============================
-    def load_staff(self, staff: Dict):
-        self._is_new = False
-        self._user_id = int(staff.get("id"))
-        self._edit_mode = False
-
-        with SessionLocal() as db:
-            u = db.query(User).get(self._user_id)
-            if not u:
-                self.lbl_name.setText(staff.get("nombre", "—"))
-                self._apply_rbac_to_buttons(view_only=True)
-                return
-            self._paint_from_user(db, u)
-
-        self._apply_rbac_to_buttons(view_only=True)
-
-    def start_create_mode(self):
-        self._is_new = True
-        self._user_id = None
-        self._edit_mode = True
-
-        self._username.setText("")
-        self._role.setCurrentText("assistant")
-        self._fill_artists_combo()
-        self._artist.setCurrentIndex(0)
-        self._active.setChecked(True)
-
-        visible_name = "(nuevo usuario)"
-        self.lbl_name.setText(visible_name)
-        self.lbl_role.setText("Asistente")
-        self.lbl_state.setText("Activo")
-        self.avatar.setPixmap(self._make_avatar_pixmap(96, visible_name))
-
-        self._toggle_edit_widgets(True)
-        self._apply_rbac_to_buttons(view_only=False)
-
-    # ============================ Helpers UI ============================
-    def _mk_perfil(self, w: QWidget):
-        outer = QVBoxLayout(w); outer.setSpacing(8)
-
-        card = QFrame(); card.setObjectName("Card")
-        lay = QVBoxLayout(card); lay.setContentsMargins(12, 12, 12, 12); lay.setSpacing(10)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(8)
+        # Perfil (card)
+        profile_card = QFrame(); profile_card.setObjectName("Card")
+        profile_card.setStyleSheet("QLabel{background:transparent;}")  # << quitar fondos de texto
+        self._prof = QGridLayout(profile_card); self._prof.setContentsMargins(12, 12, 12, 12)
+        self._prof.setHorizontalSpacing(16); self._prof.setVerticalSpacing(8)
 
         # Usuario
-        lbl1 = QLabel("Usuario:"); lbl1.setStyleSheet("background: transparent;")
-        self._username = QLineEdit(); self._username.setReadOnly(True)
-        grid.addWidget(lbl1, 0, 0, Qt.AlignRight)
-        grid.addWidget(self._username, 0, 1)
+        self.lbl_username_label = QLabel("Usuario:"); self.val_username = QLabel("—")
+        self._prof.addWidget(self.lbl_username_label, 0, 0, Qt.AlignRight); self._prof.addWidget(self.val_username, 0, 1)
+        self._username = LocalizedLineEdit(); self._prof.addWidget(self._username, 0, 1); self._username.hide()
 
-        # Rol
-        lbl2 = QLabel("Rol:"); lbl2.setStyleSheet("background: transparent;")
+        # Rol (oculto en vista; editable en edición)
+        self.lbl_role_label = QLabel("Rol:"); self.val_role = QLabel("—")
+        self._prof.addWidget(self.lbl_role_label, 1, 0, Qt.AlignRight); self._prof.addWidget(self.val_role, 1, 1)
         self._role = QComboBox(); self._role.addItems(["admin", "assistant", "artist"])
         self._role.currentTextChanged.connect(self._on_role_changed)
-        self._role.setEnabled(False)
-        grid.addWidget(lbl2, 1, 0, Qt.AlignRight)
-        grid.addWidget(self._role, 1, 1)
+        self._prof.addWidget(self._role, 1, 1); self._role.hide()
 
-        # Artista (si rol=artist)
-        lbl3 = QLabel("Artista:"); lbl3.setStyleSheet("background: transparent;")
-        self._artist = QComboBox(); self._artist.setEnabled(False)
-        grid.addWidget(lbl3, 2, 0, Qt.AlignRight)
-        grid.addWidget(self._artist, 2, 1)
+        # Nombre completo
+        self.lbl_full_label = QLabel("Nombre completo:"); self.val_full_name = QLabel("—")
+        self._prof.addWidget(self.lbl_full_label, 2, 0, Qt.AlignRight); self._prof.addWidget(self.val_full_name, 2, 1)
+        self._full_name = LocalizedLineEdit(); self._prof.addWidget(self._full_name, 2, 1); self._full_name.hide()
 
-        # Activo (único switch)
-        self._active = QCheckBox("Activo")
-        self._active.setEnabled(False)
-        grid.addWidget(self._active, 3, 1, Qt.AlignLeft)
+        # Fecha nacimiento
+        self.lbl_birth_label = QLabel("Fecha de nacimiento:"); self.val_birthdate = QLabel("—")
+        self._prof.addWidget(self.lbl_birth_label, 3, 0, Qt.AlignRight); self._prof.addWidget(self.val_birthdate, 3, 1)
+        self._birthdate = QDateEdit(); self._birthdate.setCalendarPopup(True); self._birthdate.setDisplayFormat("dd/MM/yyyy")
+        self._prof.addWidget(self._birthdate, 3, 1); self._birthdate.hide()
 
-        lay.addLayout(grid)
-        outer.addWidget(card)
+        # Email
+        self.lbl_email_label = QLabel("Email:"); self.val_email = QLabel("—")
+        self._prof.addWidget(self.lbl_email_label, 4, 0, Qt.AlignRight); self._prof.addWidget(self.val_email, 4, 1)
+        self._email = LocalizedLineEdit(); self._prof.addWidget(self._email, 4, 1); self._email.hide()
 
+        # Teléfono
+        self.lbl_phone_label = QLabel("Teléfono:"); self.val_phone = QLabel("—")
+        self._prof.addWidget(self.lbl_phone_label, 5, 0, Qt.AlignRight); self._prof.addWidget(self.val_phone, 5, 1)
+        self._phone = LocalizedLineEdit(); self._prof.addWidget(self._phone, 5, 1); self._phone.hide()
+
+        # Instagram
+        self.lbl_ig_label = QLabel("Instagram:"); self.val_instagram = QLabel("—")
+        self._prof.addWidget(self.lbl_ig_label, 6, 0, Qt.AlignRight); self._prof.addWidget(self.val_instagram, 6, 1)
+        self._instagram = LocalizedLineEdit(); self._instagram.setPlaceholderText("@usuario")
+        self._instagram.textChanged.connect(self._enforce_instagram_prefix)
+        self._prof.addWidget(self._instagram, 6, 1); self._instagram.hide()
+
+        # Nombre de artista
+        self.lbl_an_label = QLabel("Nombre de artista:"); self.val_artistname = QLabel("—")
+        self._prof.addWidget(self.lbl_an_label, 7, 0, Qt.AlignRight); self._prof.addWidget(self.val_artistname, 7, 1)
+        self._artist_name = LocalizedLineEdit(); self._artist_name.setPlaceholderText("Visible en Agenda/Reportes")
+        self._prof.addWidget(self._artist_name, 7, 1); self._artist_name.hide()
+
+        left.addWidget(profile_card)
+
+        # Guardar/Cancelar
+        actions_edit = QHBoxLayout()
+        self.btn_save = QPushButton("Guardar"); self.btn_save.setObjectName("CTA")
+        self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("GhostSmall")
+        self.btn_save.clicked.connect(self._save); self.btn_cancel.clicked.connect(self._cancel_edit)
+        actions_edit.addStretch(1); actions_edit.addWidget(self.btn_cancel); actions_edit.addWidget(self.btn_save)
+        left.addLayout(actions_edit); self.btn_save.hide(); self.btn_cancel.hide()
+
+        # Meta
+        left.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        self._meta = QLabel("—"); self._meta.setStyleSheet("background: transparent; color:#6C757D;")
+        left.addWidget(self._meta)
+
+        root.addWidget(self.card, stretch=0)
+
+        # --------- Derecha: Tabs
+        right_wrap = QFrame(); right = QVBoxLayout(right_wrap); right.setContentsMargins(0, 0, 0, 0); right.setSpacing(8)
+        self.tabs = QTabWidget(); right.addWidget(self.tabs, stretch=1)
+        self.tab_port = QWidget(); self._mk_list(self.tab_port, [])
+        self.tab_citas = QWidget(); self._mk_citas_tab(self.tab_citas)
+        self.tab_docs = QWidget(); self._mk_text(self.tab_docs, "Documentos (placeholder)")
+        self.tabs.addTab(self.tab_port, "Portafolio"); self.tabs.addTab(self.tab_citas, "Citas"); self.tabs.addTab(self.tab_docs, "Documentos")
+        root.addWidget(right_wrap, stretch=1)
+
+        # Hovers
+        self.card.installEventFilter(self); self.avatar.installEventFilter(self)
+
+        app = QApplication.instance()
+        if app: app.installEventFilter(self)  # safety extra
+
+        self._apply_rbac(view_only=True)
+
+    # ===== Helpers UI (derecha)
     def _mk_text(self, w: QWidget, text: str):
-        outer = QVBoxLayout(w); outer.setSpacing(8)
-        card = QFrame(); card.setObjectName("Card")
-        lay = QVBoxLayout(card); lay.setContentsMargins(12, 12, 12, 12); lay.setSpacing(8)
-        te = QTextEdit(); te.setPlainText(text)
-        lay.addWidget(te)
-        outer.addWidget(card)
+        outer = QVBoxLayout(w); card = QFrame(); card.setObjectName("Card")
+        lay = QVBoxLayout(card); lay.setContentsMargins(12, 12, 12, 12)
+        te = QTextEdit(); te.setPlainText(text); lay.addWidget(te); outer.addWidget(card)
 
     def _mk_list(self, w: QWidget, items):
-        outer = QVBoxLayout(w); outer.setSpacing(8)
-        card = QFrame(); card.setObjectName("Card")
-        lay = QVBoxLayout(card); lay.setContentsMargins(12, 12, 12, 12); lay.setSpacing(8)
-        lst = QListWidget(); lst.addItems(items)
-        lay.addWidget(lst)
-        outer.addWidget(card)
+        outer = QVBoxLayout(w); card = QFrame(); card.setObjectName("Card")
+        lay = QVBoxLayout(card); lay.setContentsMargins(12, 12, 12, 12)
+        lst = QListWidget(); lst.addItems(items); lay.addWidget(lst); outer.addWidget(card)
 
-    # ============================ Avatar helpers ============================
+    def _mk_citas_tab(self, w: QWidget):
+        outer = QVBoxLayout(w); card = QFrame(); card.setObjectName("Card")
+        lay = QVBoxLayout(card); lay.setContentsMargins(12, 12, 12, 12)
+        self.lst_citas = QListWidget(); lay.addWidget(self.lst_citas); outer.addWidget(card)
+
+    # ===== Avatars
     def _project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
 
     def _avatar_dir(self) -> Path:
-        p = self._project_root() / "assets" / "avatars"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        p = self._project_root() / "assets" / "avatars"; p.mkdir(parents=True, exist_ok=True); return p
 
     def _avatar_path(self, uid: int) -> Path:
         return self._avatar_dir() / f"{uid}.png"
 
     def _round_pixmap(self, pm: QPixmap, size: int) -> QPixmap:
         if pm.isNull():
-            out = QPixmap(size, size); out.fill(Qt.transparent)
-            return out
+            out = QPixmap(size, size); out.fill(Qt.transparent); return out
         pm = pm.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         out = QPixmap(size, size); out.fill(Qt.transparent)
         p = QPainter(out); p.setRenderHint(QPainter.Antialiasing)
         path = QPainterPath(); path.addEllipse(0, 0, size, size)
-        p.setClipPath(path)
-        p.drawPixmap(0, 0, pm)
-        p.end()
+        p.setClipPath(path); p.drawPixmap(0, 0, pm); p.end()
         return out
 
     def _make_avatar_pixmap(self, size: int, nombre: str) -> QPixmap:
         initials = "".join([p[0].upper() for p in (nombre or "").split()[:2]]) or "?"
         pm = QPixmap(size, size); pm.fill(Qt.transparent)
         p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QColor("#d1d5db"))
-        p.setPen(Qt.NoPen); p.drawEllipse(0, 0, size, size)
-        p.setPen(QColor("#111")); p.drawText(pm.rect(), Qt.AlignCenter, initials)
-        p.end()
+        p.setBrush(QColor("#d1d5db")); p.setPen(Qt.NoPen); p.drawEllipse(0, 0, size, size)
+        p.setPen(QColor("#111")); p.drawText(pm.rect(), Qt.AlignCenter, initials); p.end()
         return pm
 
-    def _set_avatar_from_disk_or_placeholder(self, db: Session, u: User, size: int = 96):
+    def _set_avatar_from_disk_or_placeholder(self, db: Session, u: User, size: int = 128):
         ap = self._avatar_path(u.id)
         if ap.exists():
-            pm = QPixmap(str(ap))
-            self.avatar.setPixmap(self._round_pixmap(pm, size))
+            pm = QPixmap(str(ap)); self.avatar.setPixmap(self._round_pixmap(pm, size))
         else:
             artist_name = None
             if u.role == "artist" and u.artist_id:
-                a = db.query(Artist).get(u.artist_id)
-                artist_name = a.name if a else None
+                a = db.query(Artist).get(u.artist_id); artist_name = a.name if a else None
             visible = artist_name or u.username
             self.avatar.setPixmap(self._make_avatar_pixmap(size, visible))
+        self._position_photo_btn()
 
-    # ============================ Internos ============================
-    def _fill_artists_combo(self):
-        self._artist.clear()
-        self._artist.addItem("—", None)
+    def _position_photo_btn(self):
+        a = self.avatar.size(); b = self.btn_photo.size()
+        self.btn_photo.move((a.width()-b.width())//2, (a.height()-b.height())//2)
+
+    # ===== Fechas (UTC -> local SIEMPRE si viene naive)
+    def _parse_dt_any(self, dt):
+        if isinstance(dt, (int, float)):
+            return datetime.fromtimestamp(dt, tz=timezone.utc)
+        if isinstance(dt, str):
+            s = dt.strip().replace("T", " ")
+            try:
+                return datetime.fromisoformat(s)
+            except Exception:
+                for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                    try: return datetime.strptime(s, fmt)
+                    except Exception: pass
+        return dt
+
+    def _fmt_local(self, dt):
+        if not dt: return "—"
+        try:
+            dt = self._parse_dt_any(dt)
+            if not isinstance(dt, datetime): return str(dt)
+            local_tz = datetime.now().astimezone().tzinfo
+            if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                dt = dt.replace(tzinfo=timezone.utc)  # << clave: DB guarda UTC naive
+            return dt.astimezone(local_tz).strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            try: return dt.strftime("%d/%m/%Y %H:%M")
+            except Exception: return "—"
+
+    # ===== Colores por artista
+    def _color_store_path(self) -> Path:
+        p = self._project_root() / "assets"; p.mkdir(parents=True, exist_ok=True); return p / "artist_colors.json"
+
+    def _load_color_overrides(self) -> Dict[str, str]:
+        p = self._color_store_path()
+        if not p.exists(): return {}
+        try: return json.loads(p.read_text(encoding="utf-8"))
+        except Exception: return {}
+
+    def _save_color_overrides(self, data: Dict[str, str]):
+        p = self._color_store_path()
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _artist_color_hex(self, artist_id: Optional[int]) -> str:
+        if not artist_id: return "#9CA3AF"
+        ov = self._load_color_overrides(); key = str(int(artist_id))
+        if key in ov: return ov[key]
+        idx = int(artist_id) % len(self._ARTIST_PALETTE)
+        return self._ARTIST_PALETTE[idx]
+
+    def _apply_artist_color(self, artist_id: Optional[int]):
+        hexcol = self._artist_color_hex(artist_id)
+        self.color_bar.setStyleSheet(f"background:{hexcol}; border-radius:3px;")
+        self.color_dot.setStyleSheet(f"border-radius:6px; background:{hexcol};")
+        self._style_chips(hexcol, self._current_is_active)
+
+    def _style_chips(self, artist_hex: str, is_active: bool):
+        self.lbl_role_chip.setStyleSheet(
+            f"background:transparent; color:{artist_hex}; border:1px solid {artist_hex}; padding:2px 8px; border-radius:8px;"
+        )
+        if is_active:
+            self.lbl_state_chip.setText("Activo")
+            self.lbl_state_chip.setStyleSheet(
+                f"background:transparent; color:{artist_hex}; border:1px solid {artist_hex}; padding:2px 8px; border-radius:8px;"
+            )
+        else:
+            self.lbl_state_chip.setText("Inactivo")
+            self.lbl_state_chip.setStyleSheet(
+                "background:transparent; color:#9CA3AF; border:1px solid #555a61; padding:2px 8px; border-radius:8px;"
+            )
+
+    # ===== Carga de usuario
+    def load_staff(self, staff: Dict):
+        self._is_new = False; self._user_id = int(staff.get("id")); self._edit_mode = False
         with SessionLocal() as db:
-            rows = db.query(Artist.id, Artist.name, Artist.active).order_by(Artist.name.asc()).all()
-            for aid, name, active in rows:
-                label = name if active else f"{name} (inactivo)"
-                self._artist.addItem(label, aid)
+            u = db.query(User).get(self._user_id)
+            if not u:
+                self.lbl_name.setText(staff.get("nombre", "—")); self._apply_rbac(view_only=True); return
+            self._paint_from_user(db, u); self._load_appointments(db, u)
+        self._apply_rbac(view_only=True)
 
+    def start_create_mode(self):
+        self._is_new = True; self._user_id = None; self._edit_mode = True
+        self._username.setText(""); self._role.setCurrentText("assistant")
+        self._full_name.clear(); self._birthdate.setDate(QDate.currentDate())
+        self._email.clear(); self._phone.clear(); self._instagram.clear(); self._artist_name.clear()
+        visible_name = "(nuevo usuario)"; self.lbl_name.setText(visible_name)
+        self.lbl_role_chip.setText("Asistente"); self.lbl_state_chip.setText("Activo")
+        self.avatar.setPixmap(self._make_avatar_pixmap(128, visible_name))
+        self._current_is_active = True
+        self._toggle_edit_widgets(True); self._apply_rbac(view_only=False)
+
+    # ===== Render
     def _paint_from_user(self, db: Session, u: User):
         artist_name = None
         if u.role == "artist" and u.artist_id:
-            a = db.query(Artist).get(u.artist_id)
-            if a:
-                artist_name = a.name
-        visible_name = artist_name or u.username
+            a = db.query(Artist).get(u.artist_id); artist_name = a.name if a else None
 
-        self.lbl_name.setText(visible_name)
-        self.lbl_role.setText(_role_text(u.role))
-        self.lbl_state.setText("Activo" if u.is_active else "Inactivo")
+        self._current_is_active = bool(u.is_active)
+        self._apply_artist_color(u.artist_id if u.role == "artist" else None)
 
-        self._set_avatar_from_disk_or_placeholder(db, u, size=96)
+        visible = artist_name if artist_name else (u.username or u.name or "—")
+        self.lbl_name.setText(visible); self.lbl_role_chip.setText(_role_text(u.role))
+        self._set_avatar_from_disk_or_placeholder(db, u, size=128)
 
-        # Perfil
-        self._username.setText(u.username)
-        self._role.setCurrentText(u.role)
-        self._fill_artists_combo()
-        if u.role == "artist" and u.artist_id:
-            idx = self._artist.findData(u.artist_id)
-            self._artist.setCurrentIndex(max(0, idx))
-        else:
-            self._artist.setCurrentIndex(0)
-        self._active.setChecked(bool(u.is_active))
+        # Lectura
+        self.val_username.setText(u.username or "—")
+        self.val_role.setText(_role_text(u.role))
+        self.val_full_name.setText(u.name or "—")
+        self.val_birthdate.setText(u.birthdate.strftime("%d/%m/%Y") if u.birthdate else "—")
+        self.val_email.setText(u.email or "—")
+        self.val_phone.setText(u.phone or "—")
+        self.val_instagram.setText("@" + (u.instagram or "").lstrip("@") if u.instagram else "—")
+        self.val_artistname.setText(artist_name or "—")
+
+        # Editores
+        self._username.setText(u.username or ""); self._role.setCurrentText(u.role or "assistant")
+        self._full_name.setText(u.name or "")
+        if u.birthdate: self._birthdate.setDate(QDate(u.birthdate.year, u.birthdate.month, u.birthdate.day))
+        else: self._birthdate.setDate(QDate.currentDate())
+        self._email.setText(u.email or ""); self._phone.setText(u.phone or "")
+        self._instagram.setText("@" + (u.instagram or "").lstrip("@") if u.instagram else "@")
+        self._artist_name.setText(artist_name or "")
+
+        created_txt = self._fmt_local(getattr(u, "created_at", None))
+        last_login_txt = self._fmt_local(getattr(u, "last_login", None))
+        self._meta.setText(f"Creado: {created_txt}  |  Último acceso: {last_login_txt}")
 
         self._toggle_edit_widgets(False)
 
     def _toggle_edit_widgets(self, on: bool):
-        self._username.setReadOnly(not on)
-        self._role.setEnabled(on)
-        self._artist.setEnabled(on and (self._role.currentText() == "artist"))
-        self._active.setEnabled(on)
+        self._edit_mode = on
+        for w in (self.val_username, self.val_full_name, self.val_birthdate, self.val_email,
+                  self.val_phone, self.val_instagram, self.val_artistname, self.val_role):
+            w.setVisible(not on)
+        for w in (self._username, self._role, self._full_name, self._birthdate,
+                  self._email, self._phone, self._instagram, self._artist_name):
+            w.setVisible(on)
+        self.lbl_role_label.setVisible(on)
+        self.btn_save.setVisible(on); self.btn_cancel.setVisible(on)
+        self._on_role_changed(self._role.currentText())
+        self._apply_rbac(view_only=not on)
 
     def _on_role_changed(self, role: str):
-        self._artist.setEnabled(self._edit_mode and role == "artist")
+        allowed = (self._edit_mode and role == "artist")
+        self._artist_name.setEnabled(allowed); self._artist_name.setVisible(allowed)
 
+    # ===== Edición
     def _enter_edit(self):
-        self._edit_mode = True
+        if not self._full_name.text().strip():
+            self._full_name.setText(self.val_full_name.text().replace("—", "").strip())
+        if not self._email.text().strip():
+            self._email.setText(self.val_email.text().replace("—", "").strip())
+        if not self._phone.text().strip():
+            self._phone.setText(self.val_phone.text().replace("—", "").strip())
+        if not self._artist_name.text().strip():
+            self._artist_name.setText(self.val_artistname.text().replace("—", "").strip())
+        if not self._instagram.text().strip():
+            self._instagram.setText("@" + self.val_instagram.text().lstrip("@") if self.val_instagram.text() != "—" else "@")
         self._toggle_edit_widgets(True)
-        self._apply_rbac_to_buttons(view_only=False)
 
     def _cancel_edit(self):
-        if self._is_new:
-            self.back_requested.emit()
-            return
+        if self._is_new: self.back_requested.emit(); return
         with SessionLocal() as db:
             u = db.query(User).get(self._user_id)
-            if u:
-                self._paint_from_user(db, u)
-        self._edit_mode = False
-        self._apply_rbac_to_buttons(view_only=True)
+            if u: self._paint_from_user(db, u); self._load_appointments(db, u)
+        self._toggle_edit_widgets(False)
 
-    # ---------- reglas negocio: histórico del artista ----------
-    def _artist_has_history(self, db: Session, artist_id: int) -> bool:
-        if not artist_id:
-            return False
-        has_sessions = db.query(TattooSession.id).filter(TattooSession.artist_id == artist_id).limit(1).first() is not None
-        has_tx = db.query(Transaction.id).filter(Transaction.artist_id == artist_id).limit(1).first() is not None
-        return bool(has_sessions or has_tx)
+    # ===== Instagram helpers
+    def _enforce_instagram_prefix(self, text: str):
+        if not text:
+            self._instagram.blockSignals(True); self._instagram.setText("@"); self._instagram.blockSignals(False); return
+        if not text.startswith("@"):
+            self._instagram.blockSignals(True); self._instagram.setText("@" + text.replace("@", "")); self._instagram.blockSignals(False)
+        else:
+            head, tail = text[0], text[1:].replace("@", "")
+            fixed = head + tail
+            if fixed != text:
+                self._instagram.blockSignals(True); self._instagram.setText(fixed); self._instagram.blockSignals(False)
 
-    # ---------- guardar ----------
+    # ===== Citas
+    def _try_get(self, obj, names: List[str]):
+        for n in names:
+            if hasattr(obj, n):
+                v = getattr(obj, n)
+                if callable(v):
+                    try: v = v()
+                    except Exception: continue
+                return v
+        return None
+
+    def _load_appointments(self, db: Session, u: User):
+        self.lst_citas.clear()
+        if not u.artist_id: return
+        q = db.query(TattooSession).filter(TattooSession.artist_id == u.artist_id)
+        order_attr = None
+        for cand in ("start_at", "start_time", "scheduled_at", "scheduled_time", "datetime", "date"):
+            if hasattr(TattooSession, cand): order_attr = getattr(TattooSession, cand); break
+        if order_attr is not None:
+            try: q = q.order_by(order_attr.desc())
+            except Exception: pass
+        for s in q.all():
+            dt = self._try_get(s, ["start_at", "start_time", "scheduled_at", "scheduled_time", "datetime", "date"])
+            dt_txt = ""
+            try:
+                if isinstance(dt, datetime): dt_txt = self._fmt_local(dt)
+                elif isinstance(dt, date):   dt_txt = QDate(dt.year, dt.month, dt.day).toString("dd/MM/yyyy")
+            except Exception: pass
+            client_name = ""
+            c = self._try_get(s, ["client", "customer"])
+            if c:
+                nm = self._try_get(c, ["name", "full_name"]); client_name = str(nm) if nm else ""
+            else:
+                cn = self._try_get(s, ["client_name", "customer_name"]); client_name = str(cn) if cn else ""
+            status = self._try_get(s, ["status", "state"]) or ""
+            sid = getattr(s, "id", None)
+            parts = [p for p in [dt_txt, client_name, status] if p]
+            text = " — ".join(parts) if parts else (f"Cita #{sid}" if sid else "Cita")
+            self.lst_citas.addItem(QListWidgetItem(text))
+
+    # ===== Guardar
     def _save(self):
-        cu = get_current_user() or {}
-        if not can(cu.get("role", "artist"), "staff", "manage_users", user_id=cu.get("id")):
-            QMessageBox.warning(self, "Permisos", "No tienes permisos para guardar cambios.")
-            return
+        cu = get_current_user() or {}; role = cu.get("role", "artist")
+        own_profile = (self._user_id is not None and cu.get("id") == self._user_id)
+
+        if role == "artist" and not own_profile:
+            self._toast("Permisos", "No puedes editar el perfil de otro usuario."); return
+        if not can(role, "staff", "manage_users", user_id=cu.get("id")) and not own_profile:
+            self._toast("Permisos", "No tienes permisos para guardar cambios."); return
 
         username = self._username.text().strip()
-        role = self._role.currentText().strip()
-        artist_id = self._artist.currentData()
-        is_active = self._active.isChecked()
+        rol_new  = self._role.currentText().strip()
+        full_name = (self._full_name.text() or "").strip()
+        email = (self._email.text() or "").strip()
+        phone = (self._phone.text() or "").strip()
+        instagram_text = (self._instagram.text() or "@").strip()
+        instagram = instagram_text[1:].strip() if instagram_text.startswith("@") else instagram_text
+        bq = self._birthdate.date(); birthdate_py = date(bq.year(), bq.month(), bq.day()) if bq.isValid() else None
+        artist_name = (self._artist_name.text() or "").strip() if rol_new == "artist" else ""
 
-        if not username or role not in {"admin", "assistant", "artist"}:
-            QMessageBox.warning(self, "Validación", "Usuario y rol son obligatorios.")
-            return
+        if not username or rol_new not in {"admin", "assistant", "artist"}:
+            self._toast("Validación", "Usuario y rol son obligatorios."); return
+        if rol_new == "artist" and not artist_name:
+            self._toast("Validación", "El nombre de artista es obligatorio para el rol Tatuador."); return
 
         with SessionLocal() as db:
             try:
                 if self._is_new:
-                    # Si es artist y no seleccionó uno, crea automáticamente (activo seg. estado del usuario)
                     new_artist_id = None
-                    if role == "artist":
-                        if not artist_id:
-                            new_artist_id = self._create_artist(db, name=username, active=is_active)
-                        else:
-                            new_artist_id = artist_id
-                            self._set_artist_active(db, new_artist_id, is_active)
-
+                    if rol_new == "artist": new_artist_id = self._create_artist(db, name=artist_name, active=True)
                     pwd_hash = auth.hash_password("temporal123")
-                    u = User(username=username, role=role, artist_id=new_artist_id, is_active=is_active, password_hash=pwd_hash)
-                    db.add(u)
-                    db.commit()
-                    self._user_id = u.id
-                    self._is_new = False
-                    self.staff_saved.emit()
-
+                    u = User(username=username, role=rol_new, artist_id=new_artist_id, is_active=True,
+                             name=full_name, birthdate=birthdate_py, email=email, phone=phone,
+                             instagram=instagram, password_hash=pwd_hash)
+                    db.add(u); db.commit()
+                    self._user_id = u.id; self._is_new = False; self.staff_saved.emit()
                 else:
                     u = db.query(User).get(self._user_id)
-                    if not u:
-                        QMessageBox.warning(self, "Usuario", "El usuario ya no existe.")
-                        return
-
-                    old_role = u.role
+                    if not u: self._toast("Usuario", "El usuario ya no existe."); return
                     old_artist_id = u.artist_id
-
-                    u.username = username
-                    u.role = role
-                    u.is_active = is_active
-
-                    if role == "artist":
-                        # crear/vincular si no hay
-                        if not artist_id:
-                            new_artist_id = self._create_artist(db, name=username, active=is_active)
-                            u.artist_id = new_artist_id
-                        else:
-                            # ¿cambio de vínculo? solo si no hay historial del anterior
-                            if old_artist_id and artist_id != old_artist_id:
-                                if self._artist_has_history(db, old_artist_id):
-                                    db.rollback()
-                                    QMessageBox.warning(self, "Vínculo",
-                                        "Este usuario ya tiene historial como artista. No se puede cambiar "
-                                        "la vinculación a otro artista.")
-                                    self._paint_from_user(db, u)
-                                    return
-                            u.artist_id = artist_id
-                            self._set_artist_active(db, artist_id, is_active)
-                    else:
-                        # dejó de ser artist → archivar Artist vinculado y desvincular
+                    u.username = username; u.role = rol_new
+                    u.name = full_name; u.birthdate = birthdate_py
+                    u.email = email or None; u.phone = phone or None; u.instagram = (instagram or None)
+                    if rol_new == "artist":
                         if old_artist_id:
-                            self._set_artist_active(db, old_artist_id, False)
-                        u.artist_id = None
+                            a = db.query(Artist).get(old_artist_id)
+                            if a and artist_name: a.name = artist_name
+                        else:
+                            new_artist_id = self._create_artist(db, name=artist_name, active=u.is_active)
+                            u.artist_id = new_artist_id
+                    else:
+                        if old_artist_id:
+                            self._set_artist_active(db, old_artist_id, False); u.artist_id = None
+                    db.commit(); self.staff_saved.emit()
 
-                    db.commit()
-                    self.staff_saved.emit()
-
-                # Refrescar
                 u = db.query(User).get(self._user_id)
-                self._paint_from_user(db, u)
-                self._edit_mode = False
-                self._apply_rbac_to_buttons(view_only=True)
-                QMessageBox.information(self, "Staff", "Cambios guardados.")
-
+                self._paint_from_user(db, u); self._load_appointments(db, u)
+                self._toggle_edit_widgets(False)
+                self._toast("Staff", "Cambios guardados.")
             except IntegrityError:
-                db.rollback()
-                QMessageBox.critical(self, "Usuario", "El nombre de usuario ya existe.")
+                db.rollback(); self._toast("Usuario", "El usuario o email ya existen.", error=True)
             except Exception as e:
-                db.rollback()
-                QMessageBox.critical(self, "Error", f"No se pudo guardar: {e}")
+                db.rollback(); self._toast("Error", f"No se pudo guardar: {e}", error=True)
 
     def _create_artist(self, db: Session, name: str, active: bool = True) -> int:
-        """Crea un Artist básico y devuelve su id."""
         a = Artist(name=name or "Tatuador", rate_commission=0.0, active=active)
-        db.add(a)
-        db.flush()  # para obtener a.id sin cerrar transacción
-        return int(a.id)
+        db.add(a); db.flush(); return int(a.id)
 
     def _set_artist_active(self, db: Session, artist_id: Optional[int], active: bool):
-        if not artist_id:
-            return
+        if not artist_id: return
         a = db.query(Artist).get(int(artist_id))
-        if a and bool(a.active) != bool(active):
-            a.active = bool(active)
+        if a and bool(a.active) != bool(active): a.active = bool(active)
 
     def _toggle_active(self):
-        cu = get_current_user() or {}
-        if not can(cu.get("role", "artist"), "staff", "toggle_active", user_id=cu.get("id")):
-            QMessageBox.warning(self, "Permisos", "No puedes cambiar el estado de este usuario.")
-            return
-
+        cu = get_current_user() or {}; role = cu.get("role", "artist")
+        if role != "admin":
+            self._toast("Permisos", "No puedes cambiar el estado de este usuario."); return
         with SessionLocal() as db:
             u = db.query(User).get(self._user_id)
-            if not u:
-                return
-            # Alterna usuario
+            if not u: return
             u.is_active = not u.is_active
-            # Y sincroniza Artist si aplica
             if u.role == "artist" and u.artist_id:
                 self._set_artist_active(db, u.artist_id, u.is_active)
             db.commit()
-            self._paint_from_user(db, u)
-
-        # Actualiza label del botón
-        self.btn_toggle.setText("Desactivar" if self._active.isChecked() else "Activar")
+            self._current_is_active = bool(u.is_active)
+            self._apply_artist_color(u.artist_id if u.role == "artist" else None)
+            self._paint_from_user(db, u); self._load_appointments(db, u)
         self.staff_saved.emit()
 
-    def _on_back_clicked(self):
-        if self._edit_mode:
-            res = QMessageBox.question(self, "Cambios sin guardar",
-                                       "Tienes cambios sin guardar. ¿Salir de todos modos?",
-                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if res != QMessageBox.Yes:
-                return
-        self.back_requested.emit()
-
-    # ============================ Botones / RBAC ============================
-    def _apply_rbac_to_buttons(self, *, view_only: bool):
-        cu = get_current_user() or {}
-        role = cu.get("role", "artist")
-        is_admin = (role == "admin")
-        target_id = self._user_id
-        own_profile = target_id is not None and cu.get("id") == target_id
-
-        self.btn_edit.setVisible(is_admin and view_only and not self._is_new)
-        self.btn_save.setVisible(is_admin and not view_only)
-        self.btn_cancel.setVisible(is_admin and not view_only)
-        self.btn_toggle.setVisible(is_admin and not self._is_new)
-        self.btn_password.setVisible(is_admin and not self._is_new)
-
-        self.btn_edit.setEnabled(is_admin and view_only and not self._is_new)
-        self.btn_save.setEnabled(is_admin and not view_only)
-        self.btn_cancel.setEnabled(is_admin and not view_only)
-        self.btn_toggle.setEnabled(is_admin and not self._is_new)
-        self.btn_password.setEnabled(is_admin and not self._is_new)
-
-        # Cambiar foto: admin siempre; assistant la propia (otras con elevación); artist solo propia
-        show_photo_btn = False
-        if self._is_new or target_id is None:
-            show_photo_btn = False
-        elif is_admin:
-            show_photo_btn = True
-        elif role == "assistant":
-            show_photo_btn = True  # la suya siempre; otras con elevación dentro de _on_change_photo
-        elif role == "artist":
-            show_photo_btn = own_profile
-
-        self.btn_photo.setVisible(show_photo_btn)
-        self.btn_photo.setEnabled(show_photo_btn)
-
-        # Texto del toggle acorde al estado actual
-        self.btn_toggle.setText("Desactivar" if self._active.isChecked() else "Activar")
-
-    # ============================ Acciones especiales ============================
+    # ===== Foto / Contraseña / Color
     def _on_change_photo(self):
         if self._user_id is None or self._is_new:
-            QMessageBox.information(self, "Foto", "Primero guarda el usuario para poder asignar una foto.")
-            return
+            self._toast("Foto", "Primero guarda el usuario para poder asignar una foto."); return
+        cu = get_current_user() or {}; role = cu.get("role", "artist"); own = cu.get("id") == self._user_id
+        if role == "artist" and not own:
+            self._toast("Permisos", "No puedes cambiar la foto de otro usuario."); return
+        if role == "assistant" and not own:
+            if not request_elevation_if_needed(self, "staff", "change_photo"): return
 
-        cu = get_current_user() or {}
-        role = cu.get("role", "artist")
-        own_profile = cu.get("id") == self._user_id
-
-        if role == "artist" and not own_profile:
-            QMessageBox.warning(self, "Permisos", "No puedes cambiar la foto de otro usuario.")
-            return
-        if role == "assistant" and not own_profile:
-            if not request_elevation_if_needed(self, "staff", "change_photo"):
-                return
-
-        fname, _ = QFileDialog.getOpenFileName(self, "Selecciona una imagen",
-                                               "", "Imágenes (*.png *.jpg *.jpeg *.bmp)")
-        if not fname:
-            return
-
+        fname, _ = QFileDialog.getOpenFileName(self, "Selecciona una imagen", "", "Imágenes (*.png *.jpg *.jpeg *.bmp)")
+        if not fname: return
         pm = QPixmap(fname)
-        if pm.isNull():
-            QMessageBox.warning(self, "Imagen", "No se pudo cargar la imagen seleccionada.")
-            return
-
-        out_pm = self._round_pixmap(pm, 256)
-        dest = self._avatar_path(self._user_id)
-        try:
-            out_pm.save(str(dest), "PNG")
-        except Exception as e:
-            QMessageBox.critical(self, "Imagen", f"No se pudo guardar la imagen: {e}")
-            return
-
-        self.avatar.setPixmap(self._round_pixmap(QPixmap(str(dest)), 96))
-        QMessageBox.information(self, "Foto", "Foto actualizada.")
+        if pm.isNull(): self._toast("Imagen", "No se pudo cargar la imagen seleccionada.", error=True); return
+        out_pm = self._round_pixmap(pm, 256); dest = self._avatar_path(self._user_id)
+        if not out_pm.save(str(dest), "PNG"): self._toast("Imagen", "No se pudo guardar la imagen.", error=True); return
+        self.avatar.setPixmap(self._round_pixmap(QPixmap(str(dest)), 128)); self._position_photo_btn()
+        self._toast("Foto", "Foto actualizada.")
 
     def _change_password(self):
+        if self._user_id is None or self._is_new:
+            self._toast("Contraseña", "Primero guarda el usuario."); return
         cu = get_current_user() or {}
         if cu.get("role") != "admin":
-            QMessageBox.warning(self, "Permisos", "Solo el administrador puede cambiar contraseñas aquí.")
-            return
-        if self._user_id is None or self._is_new:
-            QMessageBox.information(self, "Contraseña", "Primero guarda el usuario.")
-            return
+            self._toast("Permisos", "Solo el administrador puede cambiar contraseñas aquí."); return
 
-        from PyQt5.QtWidgets import QInputDialog, QLineEdit
-        pwd1, ok1 = QInputDialog.getText(self, "Nueva contraseña", "Escribe la nueva contraseña:",
-                                         QLineEdit.Password)
-        if not ok1 or not pwd1:
-            return
-        pwd2, ok2 = QInputDialog.getText(self, "Confirmar contraseña", "Confirma la nueva contraseña:",
-                                         QLineEdit.Password)
-        if not ok2 or not pwd2:
-            return
-        if pwd1 != pwd2:
-            QMessageBox.warning(self, "Contraseña", "Las contraseñas no coinciden.")
-            return
+        dlg = FramelessPanel("Cambiar contraseña", self)
+        form = QVBoxLayout(); form.setSpacing(8)
+        p1 = LocalizedLineEdit(); p1.setEchoMode(QLineEdit.Password); p1.setPlaceholderText("Nueva contraseña")
+        p2 = LocalizedLineEdit(); p2.setEchoMode(QLineEdit.Password); p2.setPlaceholderText("Confirmar contraseña")
+        form.addWidget(p1); form.addWidget(p2)
+
+        btns = QHBoxLayout(); btns.addStretch(1)
+        b_cancel = QPushButton("Cancelar"); b_cancel.setObjectName("GhostSmall")
+        b_ok = QPushButton("OK"); b_ok.setObjectName("CTA")
+        btns.addWidget(b_cancel); btns.addWidget(b_ok); form.addLayout(btns); dlg.v.addLayout(form)
+        b_cancel.clicked.connect(dlg.reject)
+
+        def do_ok():
+            if not p1.text() or not p2.text():
+                self._toast("Contraseña", "Llena ambos campos.", parent=dlg); return
+            if p1.text() != p2.text():
+                self._toast("Contraseña", "Las contraseñas no coinciden.", parent=dlg); return
+            try:
+                with SessionLocal() as db:
+                    u = db.query(User).get(self._user_id)
+                    if not u: self._toast("Usuario", "El usuario ya no existe.", parent=dlg); return
+                    u.password_hash = auth.hash_password(p1.text()); db.commit()
+                self._toast("Contraseña", "Contraseña actualizada.", parent=dlg)
+                dlg.accept()
+            except Exception as e:
+                self._toast("Error", f"No se pudo actualizar: {e}", parent=dlg, error=True)
+
+        b_ok.clicked.connect(do_ok)
+        dlg.resize(360, 170); dlg.exec_()
+
+    def _localize_color_dialog(self, cd: QColorDialog):
+        """Traduce/estiliza controles comunes del QColorDialog no nativo."""
+        # quitar botones internos (usamos los nuestros)
+        cd.setOption(QColorDialog.NoButtons, True)
+
+        map_btn = {
+            "Pick Screen Color": "Tomar color de pantalla",
+            "Add to Custom Colors": "Agregar a mis colores",
+            "Add to custom colors": "Agregar a mis colores",
+        }
+        map_lbl = {
+            "Basic colors": "Colores básicos",
+            "Custom colors": "Colores personalizados",
+            "Hue:": "Tono:", "Sat:": "Saturación:", "Val:": "Valor:",
+            "Red:": "Rojo:", "Green:": "Verde:", "Blue:": "Azul:",
+            "Alpha channel:": "Canal alfa:", "HTML:": "HTML:",
+        }
+        for w in cd.findChildren((QBtn, QLbl)):
+            try:
+                txt = w.text()
+                if isinstance(w, QBtn) and txt in map_btn:
+                    w.setText(map_btn[txt])
+                    w.setStyleSheet("border-radius:8px; padding:6px 10px;")
+                elif isinstance(w, QLbl) and txt in map_lbl:
+                    w.setText(map_lbl[txt])
+            except Exception:
+                pass
+
+    def _change_color(self):
+        cu = get_current_user() or {}
+        if cu.get("role") != "admin":
+            self._toast("Permisos", "Solo el administrador puede cambiar el color."); return
 
         with SessionLocal() as db:
-            try:
-                u = db.query(User).get(self._user_id)
-                if not u:
-                    QMessageBox.warning(self, "Usuario", "El usuario ya no existe.")
-                    return
-                u.password_hash = auth.hash_password(pwd1)
-                db.commit()
-                QMessageBox.information(self, "Contraseña", "Contraseña actualizada.")
-            except Exception as e:
-                db.rollback()
-                QMessageBox.critical(self, "Error", f"No se pudo actualizar: {e}")
+            u = db.query(User).get(self._user_id)
+            if not u or not u.artist_id:
+                self._toast("Color", "Este usuario no tiene perfil de artista."); return
+            current_hex = self._artist_color_hex(u.artist_id)
+
+        dlg = FramelessPanel("Color del artista", self)
+        inner = QVBoxLayout(); inner.setSpacing(8)
+
+        cd = QColorDialog(QColor(current_hex))
+        cd.setOption(QColorDialog.DontUseNativeDialog, True)
+        cd.setWindowFlags(cd.windowFlags() | Qt.FramelessWindowHint)
+        cd.setOptions(QColorDialog.ShowAlphaChannel | QColorDialog.DontUseNativeDialog)
+        self._localize_color_dialog(cd)
+        inner.addWidget(cd)
+
+        btns = QHBoxLayout(); btns.addStretch(1)
+        b_cancel = QPushButton("Cancelar"); b_cancel.setObjectName("GhostSmall")
+        b_ok = QPushButton("OK"); b_ok.setObjectName("CTA")
+        btns.addWidget(b_cancel); btns.addWidget(b_ok); inner.addLayout(btns)
+        dlg.v.addLayout(inner)
+
+        def do_save():
+            color = cd.currentColor()
+            if not color.isValid(): dlg.reject(); return
+            hexcol = color.name(); ov = self._load_color_overrides()
+            ov[str(int(u.artist_id))] = hexcol; self._save_color_overrides(ov)
+            self._apply_artist_color(u.artist_id); dlg.accept()
+
+        b_cancel.clicked.connect(dlg.reject); b_ok.clicked.connect(do_save)
+        dlg.resize(440, 400); dlg.exec_()
+
+    # ===== RBAC
+    def _apply_rbac(self, *, view_only: bool):
+        cu = get_current_user() or {}; role = cu.get("role", "artist")
+        tgt = self._user_id; own = (tgt is not None and cu.get("id") == tgt)
+        show_kebab = (role == "admin") or (role == "assistant") or (role == "artist" and own)
+        self._kebab_allowed = (show_kebab and not self._is_new); self.btn_kebab.hide()
+
+        self.act_edit.setVisible(not self._is_new); self.act_edit.setEnabled(not self._edit_mode)
+        self.act_toggle.setVisible(role == "admin" and not self._is_new)
+        self.act_toggle.setText("Desactivar" if self._current_is_active else "Activar")
+        self.act_password.setVisible(role == "admin" and not self._is_new)
+        self.act_color.setVisible(role == "admin" and not self._is_new)
+
+        if self._edit_mode:
+            self._username.setReadOnly(role != "admin")
+            self._role.setEnabled(role == "admin")
+        else:
+            self._username.setReadOnly(True); self._role.setEnabled(False)
+
+        # Foto
+        show_photo = False
+        if not self._is_new and tgt is not None:
+            if role in ("admin", "assistant"): show_photo = True
+            elif role == "artist": show_photo = own
+        self._photo_permission = show_photo
+
+    # ===== Eventos de hover/kebab
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.StatusTip and self._block_status_tips:
+            return True
+        if obj is self.card:
+            if ev.type() in (QEvent.Enter, QEvent.HoverEnter, QEvent.MouseMove):
+                if not self._edit_mode and self._kebab_allowed: self.btn_kebab.show()
+            elif ev.type() in (QEvent.Leave, QEvent.HoverLeave):
+                if not self._edit_mode: self.btn_kebab.hide()
+        elif obj is self.avatar:
+            if ev.type() in (QEvent.Enter, QEvent.HoverEnter):
+                if getattr(self, "_photo_permission", False): self.btn_photo.show()
+            elif ev.type() in (QEvent.Leave, QEvent.HoverLeave):
+                self.btn_photo.hide()
+        return super().eventFilter(obj, ev)
+
+    def enterEvent(self, ev):
+        if not self._edit_mode and self._kebab_allowed: self.btn_kebab.show()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        if not self._edit_mode: self.btn_kebab.hide()
+        super().leaveEvent(ev)
+
+    # ===== Navegación
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape:
+            if self._edit_mode:
+                # sin cambios extra: usamos nuestro toast
+                self._toast("Cambios sin guardar", "Vas a salir sin guardar. Presiona ESC de nuevo para confirmar.")
+                # single-ESC aviso; segundo ESC sale
+                if hasattr(self, "_esc_armed") and self._esc_armed:
+                    self._esc_armed = False; self.back_requested.emit(); return
+                self._esc_armed = True
+                return
+            self.back_requested.emit()
+        else:
+            super().keyPressEvent(ev)
+
+    # ===== Toast/alerta mini
+    def _toast(self, title: str, text: str, parent: QWidget = None, error: bool = False):
+        dlg = FramelessPanel(title, parent or self)
+        body = QLabel(text); body.setWordWrap(True)
+        dlg.v.addWidget(body)
+        row = QHBoxLayout(); row.addStretch(1)
+        ok = QPushButton("OK"); ok.setObjectName("CTA" if not error else "Danger")  # si tienes estilo Danger en QSS lo tomará; si no, usa CTA
+        row.addWidget(ok); dlg.v.addLayout(row)
+        ok.clicked.connect(dlg.accept)
+        dlg.resize(360, 140); dlg.exec_()

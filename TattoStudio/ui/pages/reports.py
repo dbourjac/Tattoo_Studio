@@ -1,59 +1,116 @@
+from __future__ import annotations
+
+from datetime import datetime, time
+from collections import defaultdict
+
 from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QComboBox, QDateEdit, QTableWidget, QTableWidgetItem,
-    QSizePolicy, QSpacerItem
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QComboBox,
+    QDateEdit, QTableWidget, QTableWidgetItem, QSizePolicy, QSpacerItem,
+    QFileDialog, QMessageBox, QInputDialog, QLineEdit
 )
+from PyQt5.QtGui import QPainter, QColor, QPen, QBrush
 
-# === NUEVO: imports para leer datos reales desde la BD ===
-from datetime import datetime, time
+# --------- Gráfica (opcional si está disponible) ---------
+try:
+    from PyQt5.QtChart import (
+        QChart, QChartView, QLineSeries, QCategoryAxis, QValueAxis
+    )
+    _HAVE_QCHART = True
+except Exception:
+    _HAVE_QCHART = False
+
+# ---- BD ----
 from data.db.session import SessionLocal
 from data.models.transaction import Transaction
 from data.models.session_tattoo import TattooSession
 from data.models.client import Client
 from data.models.artist import Artist as DBArtist
 
+# ---- Permisos / sesión ----
+from services.permissions import (
+    assistant_needs_code, verify_master_code, elevate_for
+)
+from services.contracts import get_current_user
+
+
+def _qcolor(c):
+    """Acepta '#RRGGBB' o QColor y devuelve QColor."""
+    return c if isinstance(c, QColor) else QColor(c)
+
+
+# Paleta discreta para tema oscuro (líneas)
+_LINE_COLORS = [
+    "#6ea8fe", "#75b798", "#e685b5", "#ffda6a",
+    "#a1c6ff", "#9ec5fe", "#8fd1b8", "#ffb8d2",
+    "#ffd166", "#b197fc",
+]
+
+# ---------- Helpers de UI ----------
+
+def _transparent(widget):
+    """QLabels/controles sin fondo para respetar el tema."""
+    try:
+        ss = widget.styleSheet() or ""
+        if "background" not in ss:
+            widget.setStyleSheet(ss + (";" if ss else "") + "background: transparent;")
+    except Exception:
+        pass
+
+
+def _chip(texto: str, checked: bool = False, on=None) -> QPushButton:
+    """Botón tipo 'chip' (toggle) usado en filtros de periodo."""
+    b = QPushButton(texto)
+    b.setCheckable(True)
+    b.setChecked(checked)
+    b.setMinimumHeight(28)
+    b.setObjectName("GhostSmall")
+    if callable(on):
+        b.clicked.connect(on)
+    return b
+
+
+def _icon_chip(prefix: str, btn: QPushButton) -> QPushButton:
+    """Prefija un emoji/icono y ajusta tamaños."""
+    if prefix:
+        btn.setText(f"{prefix}  {btn.text()}")
+    btn.setMinimumHeight(32)
+    btn.setObjectName("GhostSmall")
+    return btn
+
+
+# ============================== Página ==============================
 
 class ReportsPage(QWidget):
     """
-    Reportes financieros (con BD):
-      - Toolbar superior con Exportar (deshabilitado)
-      - Rangos rápidos: Hoy / Semana / Mes / Custom (con date edits)
-      - Filtros: Artista (desde BD), Tipo de pago
-      - Tarjeta con chips (Ventas/Tendencias/Comisiones/Propinas/Liquidaciones) + Total
-      - Tabla 'Transacciones' con paginación
+    Reportes financieros con:
+      - Periodos: Hoy / Semana / Mes / Rango personalizado (chips)
+      - Filtros: Artista, Método de pago
+      - Layout lado a lado: izquierda Transacciones (scroll infinito),
+        derecha Gráfica + totales (más ancha)
+      - Exportar CSV (Admin libre; Assistant con código; Artist no)
     """
-
-    # ---- CLAVES INTERNAS ESTABLES (no cambian aunque traduzcas la UI) ----
-    MODES = {
-        "sales": "Ventas",
-        "trends": "Tendencias",
-        "commissions": "Comisiones",
-        "tips": "Propinas",
-        "payouts": "Liquidaciones",
-    }
 
     def __init__(self):
         super().__init__()
 
-        # -------- estado/UI --------
-        self.period = "today"          # today | week | month | custom
-        self.mode = "sales"            # CLAVES internas: 'sales' | 'trends' | 'commissions' | 'tips' | 'payouts'
-        self.page_size = 10
-        self.current_page = 1
-
+        # ---- Estado de filtros/UI ----
+        self.period = "today"              # today | week | month | custom
         self.filter_artist = "Todos"
         self.filter_payment = "Todos"
         self.custom_from = QDate.currentDate()
         self.custom_to = QDate.currentDate()
 
-        # Data interna de la tabla (cada r = (QDate, cliente, monto, pago, artista))
-        self._rows = []
+        # Usuario actual
+        self._user = get_current_user() or {"id": None, "role": "artist", "artist_id": None, "username": ""}
+        self._role = self._user.get("role") or "artist"
+        self._user_artist_id = self._user.get("artist_id")
 
-        # Pre-cargar nombres de artistas desde BD para el combo
-        self._artist_names = self._fetch_artist_names()
+        # Artistas para combos
+        self._artists = self._fetch_artists()  # [(id, name)]
+        self._artist_names = [n for _, n in self._artists]
 
-        # -------- layout raíz --------
+        # ---------------- Layout raíz ----------------
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(12)
@@ -61,82 +118,56 @@ class ReportsPage(QWidget):
         # Título
         title = QLabel("Reportes financieros")
         title.setObjectName("H1")
-        self._transparent(title)  # <-- fondo transparente
+        _transparent(title)
         root.addWidget(title)
 
-        # ===================== Toolbar superior =====================
-        tb_wrap = QFrame(); tb_wrap.setObjectName("Toolbar")
-        toolbar = QHBoxLayout(tb_wrap); toolbar.setSpacing(8); toolbar.setContentsMargins(10, 8, 10, 8)
-
-        # (placeholder) Exportar CSV
-        self.btn_export = QPushButton("Exportar CSV")
-        self.btn_export.setEnabled(False)
-        toolbar.addWidget(self._icon_chip("📁", self.btn_export))
-
-        toolbar.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        root.addWidget(tb_wrap)
-
-        # ===================== Rangos rápidos =====================
+        # ---------------- Periodos + Export (misma barra) ----------------
         pr_wrap = QFrame(); pr_wrap.setObjectName("Toolbar")
         period_row = QHBoxLayout(pr_wrap); period_row.setSpacing(8); period_row.setContentsMargins(10, 8, 10, 8)
 
-        self.btn_today = self._chip("Hoy", checked=True)
-        self.btn_week  = self._chip("Esta semana")
-        self.btn_month = self._chip("Este mes")
-        self.btn_today.clicked.connect(lambda: self._set_period("today"))
-        self.btn_week.clicked.connect(lambda: self._set_period("week"))
-        self.btn_month.clicked.connect(lambda: self._set_period("month"))
+        self.btn_today  = _chip("Hoy", checked=True, on=lambda: self._set_period("today"))
+        self.btn_week   = _chip("Esta semana", on=lambda: self._set_period("week"))
+        self.btn_month  = _chip("Este mes", on=lambda: self._set_period("month"))
+        self.btn_custom = _chip("Seleccionar fechas", on=lambda: self._set_period("custom"))
 
-        period_row.addWidget(self.btn_today)
-        period_row.addWidget(self.btn_week)
-        period_row.addWidget(self.btn_month)
+        for b in (self.btn_today, self.btn_week, self.btn_month, self.btn_custom):
+            period_row.addWidget(b)
 
         # Rango personalizado
-        self.btn_custom = self._chip("Seleccionar fechas")
-        self.btn_custom.clicked.connect(lambda: self._set_period("custom"))
-        period_row.addWidget(self.btn_custom)
-
-        # Controles del rango personalizado (solo visibles en 'custom')
         self.custom_box = QFrame(); cb = QHBoxLayout(self.custom_box)
         cb.setSpacing(6); cb.setContentsMargins(0, 0, 0, 0)
-
-        lbl_de = QLabel("De:"); self._transparent(lbl_de)
-        cb.addWidget(lbl_de)
-        self.dt_from = QDateEdit(QDate.currentDate()); self.dt_from.setCalendarPopup(True)
-        cb.addWidget(self.dt_from)
-
-        lbl_a = QLabel("a:"); self._transparent(lbl_a)
-        cb.addWidget(lbl_a)
-        self.dt_to = QDateEdit(QDate.currentDate()); self.dt_to.setCalendarPopup(True)
-        cb.addWidget(self.dt_to)
-
+        lde = QLabel("De:"); _transparent(lde); cb.addWidget(lde)
+        self.dt_from = QDateEdit(QDate.currentDate()); self.dt_from.setCalendarPopup(True); cb.addWidget(self.dt_from)
+        la = QLabel("a:"); _transparent(la); cb.addWidget(la)
+        self.dt_to = QDateEdit(QDate.currentDate()); self.dt_to.setCalendarPopup(True); cb.addWidget(self.dt_to)
         self.custom_box.setVisible(False)
         period_row.addWidget(self.custom_box)
 
-        # aplicar cambio de rango
         self.dt_from.dateChanged.connect(self._on_custom_dates)
         self.dt_to.dateChanged.connect(self._on_custom_dates)
 
+        # Espaciador y Export a la derecha (misma barra)
         period_row.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        self.btn_export = QPushButton("Exportar CSV")
+        self.btn_export.clicked.connect(self._export_csv)
+        period_row.addWidget(_icon_chip("📁", self.btn_export))
         root.addWidget(pr_wrap)
 
-        # ===================== Filtros =====================
+        # Habilitar export conforme permisos
+        self._refresh_export_enabled()
+
+        # ---------------- Filtros ----------------
         flt_wrap = QFrame(); flt_wrap.setObjectName("Toolbar")
         filters = QHBoxLayout(flt_wrap); filters.setSpacing(8); filters.setContentsMargins(10, 8, 10, 8)
 
-        lbl_artist = QLabel("Artista:"); self._transparent(lbl_artist)
-        filters.addWidget(lbl_artist)
-
+        la = QLabel("Artista:"); _transparent(la); filters.addWidget(la)
         self.cbo_artist = QComboBox()
-        # Poblar desde BD: "Todos" + nombres
         self.cbo_artist.addItems(["Todos"] + self._artist_names)
         self.cbo_artist.currentTextChanged.connect(self._on_filters)
         filters.addWidget(self.cbo_artist)
 
         filters.addSpacing(12)
-        lbl_pay = QLabel("Tipo de pago:"); self._transparent(lbl_pay)
-        filters.addWidget(lbl_pay)
-
+        lp = QLabel("Tipo de pago:"); _transparent(lp); filters.addWidget(lp)
         self.cbo_payment = QComboBox()
         self.cbo_payment.addItems(["Todos", "Efectivo", "Tarjeta", "Transferencia"])
         self.cbo_payment.currentTextChanged.connect(self._on_filters)
@@ -145,107 +176,94 @@ class ReportsPage(QWidget):
         filters.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
         root.addWidget(flt_wrap)
 
-        # ===================== Tarjeta 'Ventas' =====================
-        card = QFrame(); card.setObjectName("Card")
-        card_lay = QVBoxLayout(card); card_lay.setContentsMargins(16, 12, 16, 12); card_lay.setSpacing(8)
+        # Si el usuario es ARTIST, forzar su filtro y bloquear combo
+        if self._role == "artist" and self._user_artist_id:
+            own_name = self._artist_name_by_id(self._user_artist_id)
+            if own_name:
+                self.filter_artist = own_name
+                self.cbo_artist.setCurrentText(own_name)
+                self.cbo_artist.setEnabled(False)
 
-        # Header de la tarjeta
-        hdr = QHBoxLayout(); hdr.setSpacing(8)
-        hdr_title = QLabel(self.MODES[self.mode]); hdr_title.setStyleSheet("font-weight:700;")
-        self._transparent(hdr_title)
+        # =================== LADO IZQ (Tabla) + LADO DER (KPI/Gráfica) ===================
+        side = QHBoxLayout(); side.setSpacing(12)
 
-        self.lbl_date = QLabel(self._period_text()); self._transparent(self.lbl_date)
-        self.lbl_total = QLabel(""); self.lbl_total.setStyleSheet("font-weight:800;"); self._transparent(self.lbl_total)
-        lbl_total_cap = QLabel("Total:"); self._transparent(lbl_total_cap)
+        # -------- Izquierda: Transacciones --------
+        left_card = QFrame(); left_card.setObjectName("Card")
+        left = QVBoxLayout(left_card); left.setContentsMargins(16, 12, 16, 12); left.setSpacing(8)
 
-        hdr.addWidget(hdr_title); hdr.addSpacing(12); hdr.addWidget(self.lbl_date)
-        hdr.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        hdr.addWidget(lbl_total_cap); hdr.addWidget(self.lbl_total)
-        card_lay.addLayout(hdr)
-
-        # Chips tipo pestañas (botones checkeables)
-        tabs = QHBoxLayout(); tabs.setSpacing(6)
-        self.tab_buttons = {
-            "sales": self._chip(self.MODES["sales"], checked=True),
-            "trends": self._chip(self.MODES["trends"]),
-            "commissions": self._chip(self.MODES["commissions"]),
-            "tips": self._chip(self.MODES["tips"]),
-            "payouts": self._chip(self.MODES["payouts"]),
-        }
-        self.tab_buttons["sales"].clicked.connect(lambda: self._set_mode("sales"))
-        self.tab_buttons["trends"].clicked.connect(lambda: self._set_mode("trends"))
-        self.tab_buttons["commissions"].clicked.connect(lambda: self._set_mode("commissions"))
-        self.tab_buttons["tips"].clicked.connect(lambda: self._set_mode("tips"))
-        self.tab_buttons["payouts"].clicked.connect(lambda: self._set_mode("payouts"))
-
-        for b in self.tab_buttons.values():
-            tabs.addWidget(b)
-        tabs.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        card_lay.addLayout(tabs)
-
-        root.addWidget(card)
-
-        # ===================== Tabla 'Transacciones' =====================
-        box = QFrame(); box.setObjectName("Card")
-        box_l = QVBoxLayout(box); box_l.setContentsMargins(16, 12, 16, 12); box_l.setSpacing(8)
-
-        lbl_tx = QLabel("Transacciones"); self._transparent(lbl_tx)
-        box_l.addWidget(lbl_tx)
+        lbl_tx = QLabel("Transacciones"); _transparent(lbl_tx); left.addWidget(lbl_tx)
 
         self.tbl = QTableWidget(0, 5)
         self.tbl.setHorizontalHeaderLabels(["Fecha", "Cliente", "Monto", "Pago", "Artista"])
         self.tbl.horizontalHeader().setStretchLastSection(True)
         self.tbl.setEditTriggers(self.tbl.NoEditTriggers)
         self.tbl.setSelectionBehavior(self.tbl.SelectRows)
-        box_l.addWidget(self.tbl)
+        left.addWidget(self.tbl, 1)
 
-        # Paginación
-        pager = QHBoxLayout(); pager.setSpacing(8)
-        lbl_pp = QLabel("Por página:"); self._transparent(lbl_pp)
-        pager.addWidget(lbl_pp)
-        self.cbo_page = QComboBox(); self.cbo_page.addItems(["5", "10", "25"])
-        self.cbo_page.setCurrentText(str(self.page_size))
-        self.cbo_page.currentTextChanged.connect(self._on_page_size)
-        pager.addWidget(self.cbo_page)
-        pager.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        self.btn_prev = QPushButton("⟵"); self.btn_next = QPushButton("⟶")
-        self.btn_prev.clicked.connect(self._prev_page); self.btn_next.clicked.connect(self._next_page)
-        self.lbl_page = QLabel("Página 1/1"); self._transparent(self.lbl_page)
-        pager.addWidget(self.btn_prev); pager.addWidget(self.btn_next); pager.addWidget(self.lbl_page)
+        # -------- Derecha: KPI + Gráfica (más ancha) --------
+        right_card = QFrame(); right_card.setObjectName("Card")
+        right = QVBoxLayout(right_card); right.setContentsMargins(16, 12, 16, 12); right.setSpacing(8)
 
-        box_l.addLayout(pager)
-        root.addWidget(box, stretch=1)
+        hdr = QHBoxLayout(); hdr.setSpacing(8)
+        htitle = QLabel("Ventas"); htitle.setStyleSheet("font-weight:700;"); _transparent(htitle)
+        self.lbl_date = QLabel(self._period_text()); _transparent(self.lbl_date)
+        self.lbl_total = QLabel("$0.00"); self.lbl_total.setStyleSheet("font-weight:800;"); _transparent(self.lbl_total)
+        ltot = QLabel("Total:"); _transparent(ltot)
 
-        # ======= primer render (YA SIN MOCKS) =======
-        self._rows = self._query_rows()   # lee desde BD según filtros/rango actuales
+        hdr.addWidget(htitle)
+        hdr.addSpacing(12)
+        hdr.addWidget(self.lbl_date)
+        hdr.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        hdr.addWidget(ltot); hdr.addWidget(self.lbl_total)
+        right.addLayout(hdr)
+
+        # Gráfica
+        self.chart_box = QFrame()
+        if _HAVE_QCHART:
+            self.chart = QChart()
+            self.chart.setBackgroundVisible(False)
+            self.chart.legend().setVisible(True)
+            self.chart.legend().setAlignment(Qt.AlignLeft)
+            # Legibilidad en tema oscuro
+            self.chart.legend().setLabelBrush(QBrush(QColor("#DADDE3")))
+            self.chart_view = QChartView(self.chart)
+            self.chart_view.setRenderHint(QPainter.Antialiasing)
+            cbl = QVBoxLayout(self.chart_box)
+            cbl.setContentsMargins(0, 0, 0, 0); cbl.addWidget(self.chart_view)
+        else:
+            cbl = QVBoxLayout(self.chart_box)
+            cbl.setContentsMargins(0, 0, 0, 0)
+            nochart = QLabel("La gráfica no está disponible en este entorno.")
+            nochart.setStyleSheet("opacity:0.7;")
+            nochart.setAlignment(Qt.AlignCenter)
+            cbl.addWidget(nochart)
+        right.addWidget(self.chart_box, 1)
+
+        # Añadir a layout principal lado a lado (gráfica más ancha)
+        side.addWidget(left_card, 1)   # Transacciones
+        side.addWidget(right_card, 2)  # Gráfica
+        root.addLayout(side, 1)
+
+        # Primera carga
         self._refresh()
 
-    # ---------------- UI helpers ----------------
-    def _transparent(self, *widgets):
-        """Fondo completamente transparente para etiquetas (texto)."""
-        for w in widgets:
-            w.setAttribute(Qt.WA_StyledBackground, False)
-            w.setStyleSheet((w.styleSheet() or "") + ";\nbackground: transparent;")
-
-    def _chip(self, text: str, checked: bool=False) -> QPushButton:
-        """Chip checkeable (estilízalo en QSS con QPushButton#Chip)."""
-        b = QPushButton(text); b.setObjectName("Chip"); b.setCheckable(True); b.setChecked(checked)
-        b.setMinimumHeight(32)
-        return b
-
-    def _icon_chip(self, icon_text: str, btn: QPushButton) -> QWidget:
-        """Componente pequeño: icono + botón (visual)."""
-        w = QWidget(); box = QHBoxLayout(w); box.setContentsMargins(0, 0, 0, 0); box.setSpacing(6)
-        ico = QLabel(icon_text); ico.setStyleSheet("font-size:16px;"); self._transparent(ico)
-        box.addWidget(ico); box.addWidget(btn)
-        return w
-
-    # ---------------- Carga de datos (BD) ----------------
-    def _fetch_artist_names(self):
-        """Regresa la lista de nombres de artistas (ordenados) para el combo."""
+    # ---------------- Helpers de datos/consulta ----------------
+    def _fetch_artists(self):
         with SessionLocal() as db:
-            rows = db.query(DBArtist.name).order_by(DBArtist.name.asc()).all()
-        return [r[0] for r in rows]
+            rows = db.query(DBArtist.id, DBArtist.name).order_by(DBArtist.name.asc()).all()
+        return [(r[0], r[1]) for r in rows]
+
+    def _artist_name_by_id(self, a_id):
+        for i, n in self._artists:
+            if i == a_id:
+                return n
+        return None
+
+    def _artist_id_by_name(self, name):
+        for i, n in self._artists:
+            if n == name:
+                return i
+        return None
 
     def _period_text(self) -> str:
         if self.period == "today":
@@ -257,41 +275,30 @@ class ReportsPage(QWidget):
         return f"{self.custom_from.toString('dd/MM/yyyy')} — {self.custom_to.toString('dd/MM/yyyy')}"
 
     def _date_range(self):
-        """Devuelve (desde, hasta) como QDate inclusivos según period."""
         today = QDate.currentDate()
         if self.period == "today":
             return today, today
         if self.period == "week":
-            delta_to_monday = today.dayOfWeek() - 1
-            start = today.addDays(-delta_to_monday)
+            start = today.addDays(-(today.dayOfWeek() - 1))
             end = start.addDays(6)
             return start, end
         if self.period == "month":
             start = QDate(today.year(), today.month(), 1)
             end = QDate(today.year(), today.month(), start.daysInMonth())
             return start, end
-        # custom
         return min(self.custom_from, self.custom_to), max(self.custom_from, self.custom_to)
 
     def _query_rows(self):
-        """
-        Lee transacciones reales de la BD aplicando los filtros/rango actuales.
-        Devuelve lista de tuplas: (QDate, cliente, monto, pago, artista) ya ordenada por fecha desc.
-        """
+        """Regresa tuplas (QDate, cliente, monto, método, artista) según filtros/periodo/permisos."""
         q_from, q_to = self._date_range()
-
-        # Convertir QDate → datetime (inicio/fin del día)
         start_dt = datetime.combine(q_from.toPyDate(), time(0, 0, 0))
-        end_dt   = datetime.combine(q_to.toPyDate(),   time(23, 59, 59))
+        end_dt = datetime.combine(q_to.toPyDate(), time(23, 59, 59))
 
         with SessionLocal() as db:
             q = (
                 db.query(
-                    Transaction.date,     # datetime
-                    Client.name,          # cliente
-                    Transaction.amount,   # monto
-                    Transaction.method,   # pago
-                    DBArtist.name,        # artista
+                    Transaction.date, Client.name, Transaction.amount,
+                    Transaction.method, DBArtist.name, Transaction.artist_id
                 )
                 .join(TattooSession, TattooSession.id == Transaction.session_id)
                 .join(Client, Client.id == TattooSession.client_id)
@@ -299,112 +306,210 @@ class ReportsPage(QWidget):
                 .filter(Transaction.date >= start_dt, Transaction.date <= end_dt)
             )
 
-            # Filtro de artista por nombre (si no es "Todos")
-            if self.filter_artist != "Todos":
-                q = q.filter(DBArtist.name == self.filter_artist)
+            # Permiso: si es ARTIST, solo lo propio
+            if self._role == "artist" and self._user_artist_id:
+                q = q.filter(Transaction.artist_id == self._user_artist_id)
+            else:
+                # Filtro combo artista (por nombre) si aplica
+                if self.filter_artist != "Todos":
+                    a_id = self._artist_id_by_name(self.filter_artist)
+                    if a_id:
+                        q = q.filter(Transaction.artist_id == a_id)
 
-            # Filtro de método de pago (si no es "Todos")
+            # Filtro método de pago
             if self.filter_payment != "Todos":
                 q = q.filter(Transaction.method == self.filter_payment)
 
-            # Orden por fecha desc, luego cliente (como antes)
-            q = q.order_by(Transaction.date.desc(), Client.name.asc())
+            q = q.order_by(Transaction.date.asc(), Client.name.asc())
             rows = q.all()
 
-        # Adaptar a formato de tabla: (QDate, str, float, str, str)
         out = []
-        for dt, cli, amount, method, artist in rows:
+        for dt, cli, amount, method, artist_name, _artist_id in rows:
             qd = QDate(dt.year, dt.month, dt.day)
-            out.append((qd, cli, float(amount or 0.0), method, artist))
+            out.append((qd, cli or "—", float(amount or 0.0), method or "—", artist_name or "—"))
         return out
 
-    def _apply_filters(self):
-        """
-        Antes filtraba una lista mock. Ahora delega la ‘consulta’ a la BD
-        aplicando filtros/rango, y solo devuelve la lista ordenada.
-        """
-        rows = self._query_rows()
-        return rows
-
+    # ---------------- Render principal ----------------
     def _refresh(self):
-        """Recalcula filtros, pagina la tabla y actualiza total."""
-        rows = self._apply_filters()
+        rows = self._query_rows()
 
-        # paginación
-        total_pages = max(1, (len(rows) + self.page_size - 1) // self.page_size)
-        self.current_page = min(self.current_page, total_pages)
-        start_idx = (self.current_page - 1) * self.page_size
-        page = rows[start_idx:start_idx + self.page_size]
-
-        # tabla
+        # Tabla (SIN paginación: todas las transacciones)
         self.tbl.setRowCount(0)
-        for r in page:
+        for r in rows:
             row = self.tbl.rowCount(); self.tbl.insertRow(row)
-            self.tbl.setItem(row, 0, QTableWidgetItem(r[0].toString("dd/MM/yyyy")))  # fecha (QDate)
-            self.tbl.setItem(row, 1, QTableWidgetItem(r[1]))                          # cliente
-            self.tbl.setItem(row, 2, QTableWidgetItem(f"${r[2]:,.2f}"))               # monto
-            self.tbl.setItem(row, 3, QTableWidgetItem(r[3]))                          # método
-            self.tbl.setItem(row, 4, QTableWidgetItem(r[4]))                          # artista
+            self.tbl.setItem(row, 0, QTableWidgetItem(r[0].toString("dd/MM/yyyy")))
+            self.tbl.setItem(row, 1, QTableWidgetItem(r[1]))
+            self.tbl.setItem(row, 2, QTableWidgetItem(f"${r[2]:,.2f}"))
+            self.tbl.setItem(row, 3, QTableWidgetItem(r[3]))
+            self.tbl.setItem(row, 4, QTableWidgetItem(r[4]))
 
-        # total según modo (por ahora solo 'sales' suma)
-        total = sum(r[2] for r in rows) if self.mode == "sales" else 0.0
+        # Total
+        total = sum(r[2] for r in rows)
         self.lbl_total.setText(f"${total:,.2f}")
         self.lbl_date.setText(self._period_text())
 
-        # UI de paginación
-        self.lbl_page.setText(f"Página {self.current_page}/{total_pages}")
-        self.btn_prev.setEnabled(self.current_page > 1)
-        self.btn_next.setEnabled(self.current_page < total_pages)
-
-        # Exclusividad de chips de periodo
+        # Chips de periodo
         for b in (self.btn_today, self.btn_week, self.btn_month, self.btn_custom):
             b.setChecked(False)
         {"today": self.btn_today, "week": self.btn_week, "month": self.btn_month, "custom": self.btn_custom}[self.period].setChecked(True)
 
-        # Exclusividad de pestañas por CLAVE, no por texto (evita crash al traducir)
-        for key, btn in self.tab_buttons.items():
-            btn.setChecked(key == self.mode)
+        # Gráfica de líneas (minimal)
+        self._render_chart_lines(rows)
 
-    # ---------------- slots ----------------
+        # Export habilitado/visible según permisos
+        self._refresh_export_enabled()
+
+    # ---------------- Gráfica de líneas por artista ----------------
+    def _render_chart_lines(self, rows):
+        if not _HAVE_QCHART:
+            return
+
+        # Limpiar
+        self.chart.removeAllSeries()
+        for ax in list(self.chart.axes()):
+            self.chart.removeAxis(ax)
+        self.chart.setTitle("")
+
+        if not rows:
+            return
+
+        # Armar categorías de días en el rango seleccionado
+        q_from, q_to = self._date_range()
+        n_days = q_from.daysTo(q_to) + 1
+        days = [q_from.addDays(i) for i in range(n_days)]
+        categories = [d.toString("dd/MM") for d in days]
+        x_index = {d.toString("yyyy-MM-dd"): i for i, d in enumerate(days)}
+
+        # Totales por artista y por día
+        by_artist_day = defaultdict(lambda: defaultdict(float))
+        for qd, _cli, amount, _pay, artist in rows:
+            key = qd.toString("yyyy-MM-dd")
+            if key in x_index:
+                by_artist_day[artist][key] += amount
+
+        # Crear series
+        series_list = []
+        for s_idx, (artist, per_day) in enumerate(sorted(by_artist_day.items())):
+            line = QLineSeries()
+            line.setName(artist)
+            pen = QPen(_qcolor(_LINE_COLORS[s_idx % len(_LINE_COLORS)]))
+            pen.setWidth(2)
+            line.setPen(pen)
+            line.setPointsVisible(True)
+
+            for d in days:
+                k = d.toString("yyyy-MM-dd")
+                x = x_index[k]
+                y = per_day.get(k, 0.0)
+                line.append(float(x), float(y))
+
+            series_list.append(line)
+            self.chart.addSeries(line)
+
+        # Eje X categórico
+        axisX = QCategoryAxis()
+        for i, label in enumerate(categories):
+            axisX.append(label, float(i))
+        axisX.setLabelsBrush(QBrush(QColor("#DADDE3")))
+        # Minimalismo: sin grid vertical, etiquetas un poco inclinadas si hay muchos días
+        axisX.setGridLineVisible(False)
+        if len(categories) > 14:
+            axisX.setLabelsAngle(-45)
+
+        # Eje Y con formato de moneda
+        axisY = QValueAxis()
+        axisY.setLabelFormat("$%.0f")
+        axisY.applyNiceNumbers()
+        axisY.setLabelsBrush(QBrush(QColor("#DADDE3")))
+        # Minimalismo: grid suave
+        axisY.setMinorGridLineVisible(False)
+        axisY.setGridLineColor(QColor(255, 255, 255, 30))
+
+        # Ejes
+        self.chart.addAxis(axisX, Qt.AlignBottom)
+        self.chart.addAxis(axisY, Qt.AlignLeft)
+        for s in series_list:
+            s.attachAxis(axisX)
+            s.attachAxis(axisY)
+
+    # ---------------- Interacciones ----------------
     def _set_period(self, p: str):
         self.period = p
         self.custom_box.setVisible(p == "custom")
-        self.current_page = 1
         self._refresh()
 
     def _on_custom_dates(self, _):
         self.custom_from = self.dt_from.date()
         self.custom_to = self.dt_to.date()
-        self.current_page = 1
         self._refresh()
 
     def _on_filters(self, _):
         self.filter_artist = self.cbo_artist.currentText()
         self.filter_payment = self.cbo_payment.currentText()
-        self.current_page = 1
         self._refresh()
 
-    def _set_mode(self, key: str):
-        """key es una CLAVE interna ('sales', 'trends', ...), no el texto traducido."""
-        if key not in self.MODES:
+    # ---------------- Exportar ----------------
+    def _refresh_export_enabled(self):
+        # Admin siempre; Artist nunca; Assistant sólo si puede elevar permisos
+        if self._role == "artist":
+            self.btn_export.setEnabled(False)
             return
-        self.mode = key
-        self.current_page = 1
-        self._refresh()
+        if self._role == "admin":
+            self.btn_export.setEnabled(True)
+            return
+        # assistant -> habilita botón, validamos en el click
+        if self._role == "assistant":
+            self.btn_export.setEnabled(True)
+            return
 
-    def _on_page_size(self, _):
+    def _ensure_assistant_elevation(self) -> bool:
+        """Para assistant: pide código maestro y eleva 5 min."""
+        if self._role != "assistant":
+            return True
+        if not assistant_needs_code("reports", "export"):
+            return True
+
+        # Pedir código
+        code, ok = QInputDialog.getText(self, "Código maestro", "Ingresa el código para exportar:", echo=QLineEdit.Password)
+        if not ok or not code:
+            return False
+
+        # Verificar con BD
+        with SessionLocal() as db:
+            if not verify_master_code(code, db):
+                QMessageBox.warning(self, "Permiso denegado", "Código incorrecto.")
+                return False
+
+        # Elevar 5 minutos
+        elevate_for(self._user.get("id"), minutes=5)
+        return True
+
+    def _export_csv(self):
+        # Permisos: admin libre; assistant con elevación; artist nunca
+        if self._role == "artist":
+            QMessageBox.information(self, "Sin permiso", "Tu rol no puede exportar reportes.")
+            return
+
+        if self._role == "assistant" and not self._ensure_assistant_elevation():
+            return
+
+        # Recolectar datos completos
+        rows = self._query_rows()
+        if not rows:
+            QMessageBox.information(self, "Exportar", "No hay datos para exportar.")
+            return
+
+        path, ok = QFileDialog.getSaveFileName(self, "Guardar CSV", "reportes.csv", "CSV (*.csv)")
+        if not ok or not path:
+            return
+
         try:
-            self.page_size = int(self.cbo_page.currentText())
-        except Exception:
-            self.page_size = 10
-        self.current_page = 1
-        self._refresh()
-
-    def _prev_page(self):
-        if self.current_page > 1:
-            self.current_page -= 1
-            self._refresh()
-
-    def _next_page(self):
-        self.current_page += 1
-        self._refresh()
+            import csv
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["Fecha", "Cliente", "Monto", "Pago", "Artista"])
+                for qd, cli, amt, pay, art in rows:
+                    w.writerow([qd.toString("yyyy-MM-dd"), cli, f"{amt:.2f}", pay, art])
+            QMessageBox.information(self, "Exportar", "Archivo CSV exportado correctamente.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error al exportar", f"No se pudo exportar el CSV.\n\n{e}")

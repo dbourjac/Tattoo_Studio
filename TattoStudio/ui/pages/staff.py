@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import List, Dict
+from typing import List, Dict, Optional
+from pathlib import Path
+import json
 
 from PyQt5.QtCore import Qt, pyqtSignal, QSize, QRect, QPoint
-from PyQt5.QtGui import QPixmap, QPainter, QColor
+from PyQt5.QtGui import QPixmap, QPainter, QColor, QPainterPath
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
-    QComboBox, QScrollArea, QFrame, QSizePolicy, QSpacerItem, QLayout, QStyle
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QScrollArea,
+    QFrame, QSizePolicy, QLayout, QStyle, QToolButton, QMenu, QGraphicsDropShadowEffect
 )
 
 # BD
@@ -19,55 +21,31 @@ from data.models.artist import Artist
 from services.contracts import get_current_user
 
 
-# ---------------------------
-# FlowLayout (wrap auto)
-# ---------------------------
+# --------------------------- FlowLayout (wrap auto) ---------------------------
 class FlowLayout(QLayout):
-    def __init__(self, parent=None, margin=0, hspacing=12, vspacing=12):
+    def __init__(self, parent=None, margin=0, hspacing=16, vspacing=16):
         super().__init__(parent)
         self._items = []
         self._hspace = hspacing
         self._vspace = vspacing
         self.setContentsMargins(margin, margin, margin, margin)
 
-    def addItem(self, item):
-        self._items.append(item)
-
-    def count(self):
-        return len(self._items)
-
-    def itemAt(self, index):
-        if 0 <= index < len(self._items):
-            return self._items[index]
-        return None
-
-    def takeAt(self, index):
-        if 0 <= index < len(self._items):
-            return self._items.pop(index)
-        return None
-
-    def expandingDirections(self):
-        return Qt.Orientations(Qt.Orientation(0))
-
-    def hasHeightForWidth(self):
-        return True
-
-    def heightForWidth(self, width):
-        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
-
-    def setGeometry(self, rect):
-        super().setGeometry(rect)
-        self._do_layout(rect, test_only=False)
-
-    def sizeHint(self):
-        return self.minimumSize()
+    def addItem(self, item): self._items.append(item)
+    def count(self): return len(self._items)
+    def itemAt(self, index): return self._items[index] if 0 <= index < len(self._items) else None
+    def takeAt(self, index): return self._items.pop(index) if 0 <= index < len(self._items) else None
+    def expandingDirections(self): return Qt.Orientations(Qt.Orientation(0))
+    def hasHeightForWidth(self): return True
+    def heightForWidth(self, width): return self._do_layout(QRect(0, 0, width, 0), True)
+    def setGeometry(self, rect): super().setGeometry(rect); self._do_layout(rect, False)
+    def sizeHint(self): return self.minimumSize()
 
     def minimumSize(self):
         size = QSize()
         for item in self._items:
             size = size.expandedTo(item.minimumSize())
-        left, top, right, bottom = self.getContentsMargins()
-        size += QSize(left + right, top + bottom)
+        l,t,r,b = self.getContentsMargins()
+        size += QSize(l + r, t + b)
         return size
 
     def _smart_spacing(self, pm):
@@ -76,68 +54,226 @@ class FlowLayout(QLayout):
         return -1
 
     def horizontalSpacing(self):
-        if self._hspace >= 0:
-            return self._hspace
-        return self._smart_spacing(QStyle.PM_LayoutHorizontalSpacing)
+        return self._hspace if self._hspace >= 0 else self._smart_spacing(QStyle.PM_LayoutHorizontalSpacing)
 
     def verticalSpacing(self):
-        if self._vspace >= 0:
-            return self._vspace
-        return self._smart_spacing(QStyle.PM_LayoutVerticalSpacing)
+        return self._vspace if self._vspace >= 0 else self._smart_spacing(QStyle.PM_LayoutVerticalSpacing)
 
     def _do_layout(self, rect, test_only):
-        left, top, right, bottom = self.getContentsMargins()
-        effective_rect = rect.adjusted(+left, +top, -right, -bottom)
-        x = effective_rect.x()
-        y = effective_rect.y()
-        line_height = 0
-
-        hspace = self.horizontalSpacing()
-        vspace = self.verticalSpacing()
+        l,t,r,b = self.getContentsMargins()
+        effective = rect.adjusted(+l, +t, -r, -b)
+        x, y = effective.x(), effective.y()
+        line_h = 0
+        hspace, vspace = self.horizontalSpacing(), self.verticalSpacing()
 
         for item in self._items:
-            w = item.sizeHint().width()
-            h = item.sizeHint().height()
-            if w <= 0:
-                continue
-
-            nextX = x + w + hspace
-            if nextX - hspace > effective_rect.right() and line_height > 0:
-                x = effective_rect.x()
-                y = y + line_height + vspace
-                nextX = x + w + hspace
-                line_height = 0
-
+            w, h = item.sizeHint().width(), item.sizeHint().height()
+            if w <= 0: continue
+            nxt = x + w + hspace
+            if nxt - hspace > effective.right() and line_h > 0:
+                x = effective.x()
+                y = y + line_h + vspace
+                nxt = x + w + hspace
+                line_h = 0
             if not test_only:
                 item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
-            x = nextX
-            line_height = max(line_height, h)
+            x = nxt
+            line_h = max(line_h, h)
 
-        total_height = (y + line_height - rect.y()) + bottom
-        return total_height
+        return (y + line_h - rect.y()) + b
 
+
+# ========================= Helpers de presentación =========================
 
 def _role_text(role: str) -> str:
     return {"admin": "Admin", "assistant": "Asistente", "artist": "Tatuador"}.get(role, role)
 
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
+def _avatar_dir() -> Path:
+    p = _project_root() / "assets" / "avatars"
+    p.mkdir(parents=True, exist_ok=True); return p
+
+def _avatar_path(uid: int) -> Path:
+    return _avatar_dir() / f"{uid}.png"
+
+def _round_pixmap(pm: QPixmap, size: int) -> QPixmap:
+    if pm.isNull():
+        out = QPixmap(size, size); out.fill(Qt.transparent); return out
+    pm = pm.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    out = QPixmap(size, size); out.fill(Qt.transparent)
+    p = QPainter(out); p.setRenderHint(QPainter.Antialiasing)
+    path = QPainterPath(); path.addEllipse(0, 0, size, size)
+    p.setClipPath(path); p.drawPixmap(0, 0, pm); p.end()
+    return out
+
+_ARTIST_PALETTE = ["#7C3AED", "#0EA5E9", "#10B981", "#F59E0B", "#EF4444",
+                   "#A855F7", "#06B6D4", "#84CC16", "#EAB308", "#F97316"]
+
+def _color_store_path() -> Path:
+    p = _project_root() / "assets"; p.mkdir(parents=True, exist_ok=True)
+    return p / "artist_colors.json"
+
+def _load_color_overrides() -> Dict[str, str]:
+    p = _color_store_path()
+    if not p.exists(): return {}
+    try: return json.loads(p.read_text(encoding="utf-8"))
+    except Exception: return {}
+
+def _artist_color_hex(artist_id: Optional[int]) -> str:
+    if not artist_id: return "#9CA3AF"
+    ov = _load_color_overrides(); key = str(int(artist_id))
+    if key in ov: return ov[key]
+    idx = int(artist_id) % len(_ARTIST_PALETTE)
+    return _ARTIST_PALETTE[idx]
+
+def _placeholder_avatar(size: int, nombre: str) -> QPixmap:
+    initials = "".join([p[0].upper() for p in (nombre or "").split()[:2]]) or "?"
+    pm = QPixmap(size, size); pm.fill(Qt.transparent)
+    p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QColor("#d1d5db")); p.setPen(Qt.NoPen); p.drawEllipse(0, 0, size, size)
+    p.setPen(QColor("#111")); p.drawText(pm.rect(), Qt.AlignCenter, initials); p.end()
+    return pm
+
+
+# -------------------------- Card interactiva --------------------------
+class StaffCard(QFrame):
+    open_requested = pyqtSignal(dict)
+
+    def __init__(self, data: Dict):
+        super().__init__()
+        self.data = data
+        self.setObjectName("StaffCard")     # ← outer único (no “Card” para evitar doble borde)
+        self.setMouseTracking(True)
+
+        self._body = None  # se asigna después
+
+        # Anchura inicial (se sobreescribe dinámicamente por la página)
+        self._fixed_w = 420
+        self.setMinimumWidth(self._fixed_w)
+        self.setMaximumWidth(self._fixed_w)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Barra de color superior
+        artist_hex = _artist_color_hex(data.get("artist_id") if data.get("role_raw") == "artist" else None)
+        bar = QFrame(); bar.setFixedHeight(4)
+        bar.setStyleSheet(f"background:{artist_hex}; border-radius:2px;")
+        outer.addWidget(bar)
+
+        # Cuerpo: el que tiene fondo "Card" y al que aplicamos el hover
+        body = QFrame(); body.setObjectName("Card")
+        body_l = QHBoxLayout(body)
+        pad_top_bot = 22 if data.get("role_raw") == "artist" else 18
+        body_l.setContentsMargins(14, pad_top_bot, 14, pad_top_bot)
+        body_l.setSpacing(14)
+
+        # Avatar grande
+        AV_SIZE = 96
+        avatar = QLabel(); avatar.setFixedSize(AV_SIZE, AV_SIZE)
+        avatar.setStyleSheet("background:transparent;")
+        ap = _avatar_path(int(data["id"]))
+        if ap.exists():
+            pm = _round_pixmap(QPixmap(str(ap)), AV_SIZE)
+        else:
+            pm = _placeholder_avatar(AV_SIZE, data["nombre"] or data["username"])
+        avatar.setPixmap(pm)
+        body_l.addWidget(avatar, alignment=Qt.AlignTop)
+
+        # Columna central
+        col = QVBoxLayout(); col.setSpacing(6)
+
+        # Nombre + punto
+        name_row = QHBoxLayout(); name_row.setSpacing(8)
+        dot = QLabel(); dot.setFixedSize(10, 10)
+        dot.setStyleSheet(f"background:{artist_hex}; border-radius:5px;")
+        name_row.addWidget(dot, 0, Qt.AlignVCenter)
+
+        name = QLabel(data["nombre"])
+        name.setStyleSheet("font-weight:700; background:transparent;")
+        name_row.addWidget(name, 1)
+        col.addLayout(name_row)
+
+        # Chips
+        chips = QHBoxLayout(); chips.setSpacing(8)
+        chip_role = QLabel(_role_text(data["role_raw"]))
+        chip_state = QLabel("Activo" if data["is_active"] else "Inactivo")
+        chip_role.setStyleSheet(f"background:transparent; color:{artist_hex}; border:1px solid {artist_hex}; padding:2px 8px; border-radius:8px;")
+        if data["is_active"]:
+            chip_state.setStyleSheet(f"background:transparent; color:{artist_hex}; border:1px solid {artist_hex}; padding:2px 8px; border-radius:8px;")
+        else:
+            chip_state.setStyleSheet("background:transparent; color:#9CA3AF; border:1px solid #555a61; padding:2px 8px; border-radius:8px;")
+        chips.addWidget(chip_role); chips.addWidget(chip_state); chips.addStretch(1)
+        col.addLayout(chips)
+
+        # Línea info (instagram · email)
+        info = []
+        if data.get("instagram"): info.append(data["instagram"])
+        if data.get("email"): info.append(data["email"])
+        extra = QLabel("  ·  ".join(info) if info else "—")
+        extra.setStyleSheet("background:transparent; color:#6C757D;")
+        col.addWidget(extra)
+
+        body_l.addLayout(col, stretch=1)
+        outer.addWidget(body)
+        self._body = body
+
+        # Sombra ligera (solo al crear; se intensifica en hover)
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setOffset(0, 2)
+        self._shadow.setBlurRadius(12)
+        self._shadow.setColor(QColor(0, 0, 0, 80))
+        self._body.setGraphicsEffect(self._shadow)
+
+    # Interacciones
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.open_requested.emit(self.data)
+        super().mouseReleaseEvent(e)
+
+    def contextMenuEvent(self, e):
+        m = QMenu(self)
+        act = m.addAction("Ver perfil")
+        chosen = m.exec_(e.globalPos())
+        if chosen == act:
+            self.open_requested.emit(self.data)
+
+    def enterEvent(self, e):
+        # sombreado suave (sin dibujar bordes cuadrados sobre el body)
+        self._body.setStyleSheet("background: rgba(255,255,255,0.04);")
+        self._shadow.setBlurRadius(18)
+        self._shadow.setColor(QColor(0, 0, 0, 120))
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._body.setStyleSheet("")  # vuelve a QSS por defecto
+        self._shadow.setBlurRadius(12)
+        self._shadow.setColor(QColor(0, 0, 0, 80))
+        super().leaveEvent(e)
+
+    # para que la página pueda fijar el ancho exacto de 3-col
+    def set_fixed_width(self, w: int):
+        self._fixed_w = max(360, w)
+        self.setMinimumWidth(self._fixed_w)
+        self.setMaximumWidth(self._fixed_w)
+
+
+# ============================== Página Staff ==============================
 class StaffPage(QWidget):
-    """
-    Staff (conectado a BD):
-      - Toolbar (solo admin): Agregar staff | Importar/Exportar (disabled)
-      - Filtros: Buscar + rol + estado + orden
-      - Cards en FlowLayout (wrap), sin paginación
-    """
-    agregar_staff = pyqtSignal()       # MainWindow abrirá el detalle en modo “nuevo”
-    abrir_staff = pyqtSignal(dict)     # Emite diccionario compacto del usuario
+    agregar_staff = pyqtSignal()
+    abrir_staff = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
 
-        # ---- estado UI ----
+        # ---- estado UI (por defecto Estado = Activo) ----
         self.search_text = ""
         self.filter_role = "Todos"
-        self.filter_state = "Todos"
+        self.filter_state = "Activo"
         self.order_by = "A–Z"
 
         # ---- layout raíz ----
@@ -145,130 +281,123 @@ class StaffPage(QWidget):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(12)
 
-        # ========================= Toolbar superior (solo admin) =========================
-        bar_top = QFrame()
-        bar_top.setObjectName("Toolbar")
-        bar_top_l = QHBoxLayout(bar_top)
-        bar_top_l.setContentsMargins(12, 8, 12, 8)
-        bar_top_l.setSpacing(8)
-
-        self.btn_new = QPushButton("Agregar staff")
-        self.btn_new.setObjectName("CTA")
-        self.btn_new.setMinimumHeight(34)
-        self.btn_new.clicked.connect(self.agregar_staff.emit)
-        bar_top_l.addWidget(self.btn_new)
-
-        bar_top_l.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-
-        self.btn_import = QPushButton("Importar CSV");  self.btn_import.setObjectName("GhostSmall"); self.btn_import.setEnabled(False)
-        self.btn_export = QPushButton("Exportar CSV");  self.btn_export.setObjectName("GhostSmall"); self.btn_export.setEnabled(False)
-        bar_top_l.addWidget(self.btn_import)
-        bar_top_l.addWidget(self.btn_export)
-
-        root.addWidget(bar_top)
-        # guardamos referencia para RBAC
-        self._admin_toolbar = bar_top
-
-        # ========================= Toolbar filtros (visible para todos) ==================
-        bar_filters = QFrame()
-        bar_filters.setObjectName("Toolbar")
-        f = QHBoxLayout(bar_filters)
-        f.setContentsMargins(12, 8, 12, 8)
-        f.setSpacing(8)
+        # ----------------- Filtros -----------------
+        bar_filters = QFrame(); bar_filters.setObjectName("Toolbar")
+        f = QHBoxLayout(bar_filters); f.setContentsMargins(12, 8, 12, 8); f.setSpacing(8)
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Buscar por nombre/usuario, rol o artista…")
+        self.search.setStyleSheet("""
+            QLineEdit{ color:#E8EAF0; }
+            QLineEdit::placeholder{ color:#B9C2CF; }
+        """)
         self.search.textChanged.connect(self._on_search)
         f.addWidget(self.search, stretch=1)
 
-        lbl_rol = QLabel("Rol:"); lbl_rol.setStyleSheet("background: transparent;")
-        lbl_est = QLabel("Estado:"); lbl_est.setStyleSheet("background: transparent;")
-        lbl_ord = QLabel("Ordenar por:"); lbl_ord.setStyleSheet("background: transparent;")
+        lbl_rol = QLabel("Rol:"); lbl_rol.setStyleSheet("background:transparent;")
+        lbl_est = QLabel("Estado:"); lbl_est.setStyleSheet("background:transparent;")
+        lbl_ord = QLabel("Ordenar por:"); lbl_ord.setStyleSheet("background:transparent;")
 
+        # --- combos ---
         self.cbo_role = QComboBox(); self.cbo_role.addItems(["Todos", "Admin", "Asistente", "Tatuador"])
-        self.cbo_role.currentTextChanged.connect(self._on_filter_change)
         self.cbo_state = QComboBox(); self.cbo_state.addItems(["Todos", "Activo", "Inactivo"])
-        self.cbo_state.currentTextChanged.connect(self._on_filter_change)
         self.cbo_order = QComboBox(); self.cbo_order.addItems(["A–Z", "Rol"])
+
+        # Seleccionar "Activo" sin disparar signals durante __init__
+        self.cbo_state.blockSignals(True)
+        self.cbo_state.setCurrentText("Activo")
+        self.cbo_state.blockSignals(False)
+
+        # Ahora sí conectar signals
+        self.cbo_role.currentTextChanged.connect(self._on_filter_change)
+        self.cbo_state.currentTextChanged.connect(self._on_filter_change)
         self.cbo_order.currentTextChanged.connect(self._on_order_change)
+
 
         f.addWidget(lbl_rol); f.addWidget(self.cbo_role)
         f.addWidget(lbl_est); f.addWidget(self.cbo_state)
         f.addWidget(lbl_ord); f.addWidget(self.cbo_order)
         root.addWidget(bar_filters)
 
-        # ========================= Zona de cards (Flow) ====================
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-
-        host = QWidget()
-        self.flow = FlowLayout(host, margin=0, hspacing=16, vspacing=16)
-        host.setLayout(self.flow)
-        self.scroll.setWidget(host)
+        # ----------------- Zona de cards -----------------
+        self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setFrameShape(QFrame.NoFrame)
+        self.host = QWidget()
+        self.flow = FlowLayout(self.host, margin=0, hspacing=16, vspacing=16)
+        self.host.setLayout(self.flow)
+        self.scroll.setWidget(self.host)
         root.addWidget(self.scroll, stretch=1)
 
-        # Carga inicial desde BD
+        # ----------------- FAB (+) abajo derecha (solo admin) -----------------
+        bottom_row = QHBoxLayout(); bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.addStretch(1)
+        self.btn_fab = QToolButton()
+        self.btn_fab.setText("+"); self.btn_fab.setToolTip("Agregar staff")
+        self.btn_fab.setFixedSize(56, 56)
+        self.btn_fab.setObjectName("GhostSmall")
+        self.btn_fab.setStyleSheet("""
+            QToolButton {
+                border-radius: 28px;
+                border: 1px solid rgba(255,255,255,0.14);
+                padding: 0px; font-weight:800; font-size:22px;
+                background: rgba(255,255,255,0.08);
+            }
+            QToolButton:hover { background: rgba(255,255,255,0.16); }
+        """)
+        self.btn_fab.clicked.connect(self.agregar_staff.emit)
+        bottom_row.addWidget(self.btn_fab, 0, Qt.AlignRight)
+        root.addLayout(bottom_row)
+
+        # Carga inicial
+        self._cards: List[StaffCard] = []
         self._all: List[Dict] = []
         self.reload_from_db_and_refresh()
+        self._apply_fab_rbac()
 
-        # Aplica RBAC inicial de la toolbar (y también en showEvent)
-        self._apply_toolbar_rbac()
-
-    # ----------------------- RBAC toolbar -----------------------
-    def _apply_toolbar_rbac(self):
-        """Muestra/oculta toda la barra superior según el rol actual."""
+    # ----------------------- RBAC FAB -----------------------
+    def _apply_fab_rbac(self):
         cu = get_current_user() or {}
-        is_admin = (cu.get("role") == "admin")
-
-        # barra completa solo para admin
-        self._admin_toolbar.setVisible(is_admin)
-
-        # y por claridad, también los botones (aunque estén dentro)
-        self.btn_new.setVisible(is_admin)
-        self.btn_import.setVisible(is_admin)
-        self.btn_export.setVisible(is_admin)
+        self.btn_fab.setVisible(cu.get("role") == "admin")
 
     def showEvent(self, e):
         super().showEvent(e)
-        # Al entrar a la vista (o cambiar de usuario) reevalúa la toolbar
-        self._apply_toolbar_rbac()
+        self._apply_fab_rbac()
+        self._update_card_widths()  # asegurar 3-col al mostrarse
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._update_card_widths()  # recalcular al redimensionar ventana
 
     # ----------------------- BD -----------------------
     def _load_from_db(self) -> List[Dict]:
-        """
-        Devuelve una lista de dicts con los campos necesarios para pintar las cards.
-        """
-        rows: List[Dict] = []
+        out: List[Dict] = []
         with SessionLocal() as db:  # type: Session
-            # LEFT JOIN para traer el nombre del artista si aplica
             q = (
                 db.query(
                     User.id, User.username, User.role, User.is_active, User.artist_id,
-                    Artist.name.label("artist_name")
+                    User.email, User.instagram, Artist.name.label("artist_name")
                 )
                 .outerjoin(Artist, Artist.id == User.artist_id)
             )
-            for (uid, username, role, is_active, artist_id, artist_name) in q.all():
-                nombre_visible = artist_name if (role == "artist" and artist_name) else username
-                rows.append({
+            for (uid, username, role, is_active, artist_id, email, instagram, artist_name) in q.all():
+                nombre = artist_name if (role == "artist" and artist_name) else (username or "")
+                out.append({
                     "id": uid,
-                    "username": username,
-                    "nombre": nombre_visible or username,
-                    "rol": _role_text(role),
+                    "username": username or "",
+                    "nombre": nombre,
                     "role_raw": role,
-                    "estado": "Activo" if is_active else "Inactivo",
                     "is_active": bool(is_active),
                     "artist_id": artist_id,
-                    "artist_name": artist_name or "—",
+                    "artist_name": artist_name or "",
+                    "email": email or "",
+                    "instagram": ("@" + (instagram or "").lstrip("@")) if instagram else "",
                 })
-        return rows
+        return out
 
     def reload_from_db_and_refresh(self):
         self._all = self._load_from_db()
         self._refresh()
 
-    # ----------------------- filtrado/orden -----------------------
+    # ----------------------- filtro/orden -----------------------
     def _apply_filters(self) -> List[Dict]:
         txt = self.search_text.lower().strip()
 
@@ -277,106 +406,72 @@ class StaffPage(QWidget):
                 if not (
                     txt in s["nombre"].lower()
                     or txt in s["username"].lower()
-                    or txt in s["rol"].lower()
+                    or txt in _role_text(s["role_raw"]).lower()
                     or (s.get("artist_name") and txt in s["artist_name"].lower())
+                    or (s.get("email") and txt in s["email"].lower())
+                    or (s.get("instagram") and txt in s["instagram"].lower())
                 ):
                     return False
-            if self.filter_role != "Todos" and s["rol"] != self.filter_role:
+            if self.cbo_role.currentText() != "Todos" and _role_text(s["role_raw"]) != self.cbo_role.currentText():
                 return False
-            if self.filter_state != "Todos" and s["estado"] != self.filter_state:
-                return False
+            if self.cbo_state.currentText() != "Todos":
+                if self.cbo_state.currentText() == "Activo" and not s["is_active"]:
+                    return False
+                if self.cbo_state.currentText() == "Inactivo" and s["is_active"]:
+                    return False
             return True
 
         rows = [s for s in self._all if match(s)]
-        if self.order_by == "A–Z":
+        if self.cbo_order.currentText() == "A–Z":
             rows.sort(key=lambda s: s["nombre"].lower())
-        elif self.order_by == "Rol":
-            rows.sort(key=lambda s: (s["rol"], s["nombre"].lower()))
+        else:
+            rows.sort(key=lambda s: (_role_text(s["role_raw"]), s["nombre"].lower()))
         return rows
 
     def _refresh(self):
-        # limpiar flow actual
+        # limpiar flow
         while self.flow.count():
             it = self.flow.takeAt(0)
             w = it.widget()
-            if w:
-                w.deleteLater()
+            if w: w.deleteLater()
 
-        # crear cards y añadir al flow
+        self._cards.clear()
+
+        # crear cards
         for s in self._apply_filters():
-            card = self._make_card(s)
+            card = StaffCard(s)
+            card.open_requested.connect(self.abrir_staff.emit)
             self.flow.addWidget(card)
+            self._cards.append(card)
 
-    # ----------------------- card -----------------------
-    def _make_card(self, s: Dict) -> QFrame:
-        CARD_W = 520
+        # ajustar ancho a 3-col luego de crear
+        self._update_card_widths()
 
-        card = QFrame()
-        card.setObjectName("Card")
-        card.setMinimumWidth(CARD_W)
-        card.setMaximumWidth(CARD_W)
-        card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
+    # ----------------------- cálculo 3 columnas -----------------------
+    def _update_card_widths(self):
+        if not self._cards:
+            return
+        spacing = self.flow.horizontalSpacing() or 16
+        cols = 3
+        avail = self.scroll.viewport().width()
+        # margen lateral del layout raíz: 24 a cada lado; el FlowLayout tiene margin 0.
+        usable = max(200, avail - 0)
+        card_w = int((usable - (cols - 1) * spacing) / cols)
+        card_w = max(380, card_w)  # límite bajo para no romper layout
 
-        lay = QHBoxLayout(card)
-        lay.setContentsMargins(14, 14, 14, 14)
-        lay.setSpacing(14)
+        for c in self._cards:
+            c.set_fixed_width(card_w)
 
-        # Avatar circular
-        avatar = QLabel()
-        avatar.setFixedSize(64, 64)
-        avatar.setStyleSheet("background: transparent;")
-        avatar.setPixmap(self._make_avatar_pixmap(64, s["nombre"]))
-        lay.addWidget(avatar, alignment=Qt.AlignTop)
-
-        # Columna central
-        col = QVBoxLayout(); col.setSpacing(6)
-
-        name = QLabel(s["nombre"])
-        name.setStyleSheet("font-weight:700; background: transparent;")
-        col.addWidget(name)
-
-        row_meta = QHBoxLayout(); row_meta.setSpacing(10)
-        role = QLabel(s["rol"]);     role.setStyleSheet("background: transparent; color:#6C757D;")
-        state = QLabel(s["estado"]); state.setStyleSheet("background: transparent; color:#6C757D;")
-        row_meta.addWidget(role); row_meta.addWidget(state); row_meta.addStretch(1)
-        col.addLayout(row_meta)
-
-        # Si es artista, muestra el username debajo; si no, muestra “—”
-        extra = QLabel(s["username"] if s["role_raw"] == "artist" else "—")
-        extra.setStyleSheet("background: transparent; color:#6C757D;")
-        col.addWidget(extra)
-
-        lay.addLayout(col, stretch=1)
-
-        # Acciones
-        actions = QVBoxLayout(); actions.setSpacing(8)
-        btn_profile = QPushButton("Ver perfil"); btn_profile.setObjectName("GhostSmall")
-        btn_profile.clicked.connect(lambda: self.abrir_staff.emit(s))
-        actions.addWidget(btn_profile); actions.addStretch(1)
-        lay.addLayout(actions)
-
-        return card
-
-    def _make_avatar_pixmap(self, size: int, nombre: str) -> QPixmap:
-        initials = "".join([p[0].upper() for p in nombre.split()[:2]]) or "?"
-        pm = QPixmap(size, size); pm.fill(Qt.transparent)
-        p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QColor("#d1d5db"))  # círculo claro (se ve bien en ambos temas)
-        p.setPen(Qt.NoPen); p.drawEllipse(0, 0, size, size)
-        p.setPen(QColor("#111")); p.drawText(pm.rect(), Qt.AlignCenter, initials)
-        p.end()
-        return pm
+        # Forzar relayout
+        self.host.updateGeometry()
+        self.flow.invalidate()
 
     # ----------------------- eventos -----------------------
     def _on_search(self, t: str):
-        self.search_text = t
-        self._refresh()
+        self.search_text = t; self._refresh()
 
     def _on_filter_change(self, _):
-        self.filter_role = self.cbo_role.currentText()
-        self.filter_state = self.cbo_state.currentText()
         self._refresh()
 
     def _on_order_change(self, _):
-        self.order_by = self.cbo_order.currentText()
         self._refresh()
