@@ -1,22 +1,33 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta, time
 import csv
 import os
+from pathlib import Path
+import json
 
 from PyQt5.QtCore import Qt, QDate, QTime, QPoint, pyqtSignal, QTimer, QEvent
-from PyQt5.QtGui import QFontMetrics, QColor
+from PyQt5.QtGui import QFontMetrics, QColor, QPainter, QPainterPath, QPixmap, QMouseEvent, QCursor
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QDateEdit, QFrame, QCheckBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QLineEdit, QHeaderView, QSizePolicy, QFileDialog,
-    QMessageBox, QMenu, QDialog, QFormLayout, QDialogButtonBox, QSpinBox, QCompleter
+    QMessageBox, QMenu, QDialog, QFormLayout, QDialogButtonBox, QSpinBox, QCompleter,
+    QPlainTextEdit, QDoubleSpinBox
 )
 
 # === BD / servicios ===
 from services.sessions import (
     list_sessions, update_session, complete_session, cancel_session, create_session
 )
+# delete_session es opcional: si no existe, lo manejamos abajo
+try:
+    from services.sessions import delete_session  # type: ignore
+except Exception:
+    delete_session = None  # fallback
+
 from data.db.session import SessionLocal
 from data.models.client import Client
 from data.models.artist import Artist as DBArtist
@@ -50,40 +61,217 @@ class Appt:
 
 
 # ==============================
-#   DIALOGOS
+#   HELPERS COLORES / ASSETS
 # ==============================
 
-class PaymentDialog(QDialog):
-    def __init__(self, parent=None):
+_DEFAULT_PALETTE = [
+    "#7C3AED", "#0EA5E9", "#10B981", "#F59E0B",
+    "#EF4444", "#06B6D4", "#A855F7", "#84CC16",
+    "#EAB308", "#F97316"
+]
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+def _color_store_path() -> Path:
+    p = _project_root() / "assets"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "artist_colors.json"
+
+def _load_overrides() -> Dict[str, str]:
+    p = _color_store_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _artist_color_for(aid: int, idx_fallback: int) -> str:
+    ov = _load_overrides()
+    key = str(int(aid))
+    if key in ov:
+        return ov[key]
+    return _DEFAULT_PALETTE[idx_fallback % len(_DEFAULT_PALETTE)]
+
+
+# ==============================
+#   ESTILO POR ESTADO
+# ==============================
+
+def _status_style(bg: str, border_hex: str, state: str) -> str:
+    """
+    Fondo sólido con el color del artista (relleno total) y variación mínima por estado.
+    """
+    def hex_to_rgba(h, a=1.0):
+        h = h.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{b},{a})"
+
+    base = border_hex or "#6b7280"
+
+    # Relleno casi pleno; pequeñas variaciones por estado
+    if state == "Completada":
+        back = hex_to_rgba(base, 0.95)
+    elif state == "Cancelada":
+        back = hex_to_rgba(base, 0.55)
+    elif state == "En espera":
+        back = hex_to_rgba(base, 0.85)
+    else:  # Activa
+        back = hex_to_rgba(base, 0.98)
+
+    if bg:
+        back = bg
+
+    return f"""
+    QFrame {{
+        background: {back};
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 8px;
+        color: white;
+    }}
+    QFrame:hover {{
+        background: {hex_to_rgba(base, 1.0)};
+    }}
+    QLabel {{ background: transparent; }}
+    """
+
+
+# ==============================
+# DIÁLOGOS (frameless/arrastrables)
+# ==============================
+class _FramelessDialog(QDialog):
+    def __init__(self, title: str, parent=None, close_on_click_outside: bool = False):
         super().__init__(parent)
-        self.setWindowTitle("Completar cita")
+        self._close_on_outside = close_on_click_outside
+
+        # Sin barra de título; NO DeleteOnClose (evita crash al leer values())
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setModal(True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
 
-        form = QFormLayout(self)
-        self.cbo = QComboBox()
-        self.cbo.addItems(["Efectivo", "Tarjeta", "Transferencia"])
-        form.addRow("Método de pago:", self.cbo)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        form.addRow(bb)
+        # “outer” cubre todo el QDialog: esquinas 100% redondeadas (sin triángulos)
+        self.outer = QFrame(self)
+        self.outer.setObjectName("outer")
+        root.addWidget(self.outer)
 
-    def method(self) -> str:
-        return self.cbo.currentText()
+        wrap = QVBoxLayout(self.outer)
+        wrap.setContentsMargins(14, 14, 14, 14)
+        wrap.setSpacing(10)
 
+        self.header = QLabel(title, self.outer)
+        self.header.setStyleSheet("font-weight:700; background: transparent;")
+        wrap.addWidget(self.header)
 
-class NewApptDialog(QDialog):
+        self.body = QFrame(self.outer)
+        self.body.setStyleSheet("background: transparent;")
+        self.body_l = QVBoxLayout(self.body)
+        self.body_l.setContentsMargins(0, 0, 0, 0)
+        self.body_l.setSpacing(8)
+        wrap.addWidget(self.body)
+
+        # Estilo homogéneo (inputs NO quedan blancos)
+        self.setStyleSheet("""
+        QDialog { background: transparent; }
+        QFrame#outer {
+            background: #1f242b;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 10px;
+        }
+        QLabel, QPlainTextEdit { background: transparent; }
+        QDateEdit, QSpinBox, QComboBox, QLineEdit, QPlainTextEdit {
+            background: #2a3139;
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 8px;
+            padding: 6px 8px;
+            color: #e6eaf0;
+        }
+        QDateEdit:hover, QSpinBox:hover, QComboBox:hover, QLineEdit:hover, QPlainTextEdit:hover {
+            border-color: rgba(255,255,255,0.20);
+        }
+        QPushButton#okbtn, QPushButton#cancelbtn {
+            border: 1px solid rgba(255,255,255,0.20);
+            border-radius: 8px;
+            padding: 6px 12px;
+        }
+        QPushButton#okbtn:hover, QPushButton#cancelbtn:hover {
+            background: rgba(255,255,255,0.08);
+        }
+        """)
+
+        self.resize(460, 340)
+        self._drag_pos = None
+        self._filter_installed = False
+
+    # Arrastrable
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag_pos = e.globalPos() - self.frameGeometry().topLeft()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_pos and (e.buttons() & Qt.LeftButton):
+            self.move(e.globalPos() - self._drag_pos)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_pos = None
+        super().mouseReleaseEvent(e)
+
+    # Click fuera (solo si se activó)
+    def showEvent(self, e):
+        if self._close_on_outside and not self._filter_installed:
+            from PyQt5.QtWidgets import QApplication
+            QApplication.instance().installEventFilter(self)
+            self._filter_installed = True
+        return super().showEvent(e)
+
+    def closeEvent(self, e):
+        if self._filter_installed:
+            from PyQt5.QtWidgets import QApplication
+            QApplication.instance().removeEventFilter(self)
+            self._filter_installed = False
+        return super().closeEvent(e)
+
+    def eventFilter(self, obj, ev):
+        if self._close_on_outside and ev.type() == QEvent.MouseButtonPress:
+            if isinstance(ev, QMouseEvent):
+                # Usa frameGeometry() (coordenadas globales) para detectar fuera
+                if not self.frameGeometry().contains(ev.globalPos()):
+                    self.reject()
+                    return True
+        return super().eventFilter(obj, ev)
+
+class _ClickAwayDialog(_FramelessDialog):
+    """
+    Igual que _FramelessDialog pero con comportamiento tipo 'popup':
+    se cierra automáticamente al perder foco o al hacer click fuera.
+    """
+    def __init__(self, title: str, parent=None):
+        super().__init__(title, parent, close_on_click_outside=False)
+        # Qt.Popup hace que se cierre al click fuera y al perder foco.
+        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
+
+    # Si por alguna razón pierde el foco, ciérralo (comportamiento de popup)
+    def focusOutEvent(self, e):
+        try:
+            self.reject()
+        except Exception:
+            pass
+        super().focusOutEvent(e)
+
+class NewApptDialog(_FramelessDialog):
     """Diálogo de nueva cita con autocompletado de clientes."""
     def __init__(self, parent, artists: List[Artist], clients: List[Tuple[int, str]], default_date: QDate):
-        super().__init__(parent)
-        self.setWindowTitle("Nueva cita")
-        self.setModal(True)
+        super().__init__("Nueva cita", parent)
 
-        form = QFormLayout(self)
+        form = QFormLayout(); form.setContentsMargins(0,0,0,0)
 
-        self.dt_date = QDateEdit(default_date)
-        self.dt_date.setCalendarPopup(True)
+        self.dt_date = QDateEdit(default_date); self.dt_date.setCalendarPopup(True)
         form.addRow("Fecha:", self.dt_date)
 
         self.sp_hour = QSpinBox(); self.sp_hour.setRange(0, 23); self.sp_hour.setValue(12)
@@ -101,40 +289,224 @@ class NewApptDialog(QDialog):
         form.addRow("Artista:", self.cbo_artist)
 
         # Cliente con combo editable + completer
-        self.cb_client = QComboBox()
-        self.cb_client.setEditable(True)
-        self.cb_client.setInsertPolicy(QComboBox.NoInsert)
+        self.cb_client = QComboBox(); self.cb_client.setEditable(True); self.cb_client.setInsertPolicy(QComboBox.NoInsert)
         for cid, cname in clients:
             self.cb_client.addItem(cname, cid)
         completer = QCompleter([n for _, n in clients], self.cb_client)
-        completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self.cb_client.setCompleter(completer)
+        completer.setCaseSensitivity(Qt.CaseInsensitive); self.cb_client.setCompleter(completer)
         form.addRow("Cliente:", self.cb_client)
 
-        self.ed_service = QLineEdit(placeholderText="Servicio / notas")
+        self.ed_service = QPlainTextEdit(); self.ed_service.setPlaceholderText("Servicio / notas")
+        self.ed_service.setFixedHeight(80)
         form.addRow("Servicio:", self.ed_service)
 
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        form.addRow(bb)
+        self.cbo_status = QComboBox(); self.cbo_status.addItems(["Activa", "En espera", "Completada", "Cancelada"])
+        form.addRow("Estado:", self.cbo_status)
+
+        self.body_l.addLayout(form)
+
+        btns = QHBoxLayout()
+        self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("cancelbtn")
+        self.btn_ok = QPushButton("OK"); self.btn_ok.setObjectName("okbtn")
+        self.btn_cancel.clicked.connect(self.reject); self.btn_ok.clicked.connect(self.accept)
+        btns.addStretch(1); btns.addWidget(self.btn_cancel); btns.addWidget(self.btn_ok)
+        self.body_l.addLayout(btns)
 
     def values(self) -> dict:
         date = self.dt_date.date()
         h, m = self.sp_hour.value(), self.sp_min.value()
         start = datetime(date.year(), date.month(), date.day(), h, m, 0)
         dur   = self.sp_dur.value()
-        # Si el usuario escribió un nombre que no coincide con ítem, currentData será None
         client_id = self.cb_client.currentData()
         client_name = self.cb_client.currentText().strip()
         return {
             "artist_id": int(self.cbo_artist.currentData()),
             "client_id": int(client_id) if client_id is not None else None,
             "client_name": client_name or None,
-            "notes": (self.ed_service.text() or "").strip(),
+            "notes": (self.ed_service.toPlainText() or "").strip(),
+            "status": self.cbo_status.currentText(),
             "start": start,
             "end": start + timedelta(minutes=dur),
         }
+
+
+class EditApptDialog(_FramelessDialog):
+    def __init__(self, parent, artists: List[Artist], clients: List[Tuple[int, str]], ap: Appt):
+        super().__init__("Editar cita", parent)
+
+        form = QFormLayout(); form.setContentsMargins(0,0,0,0)
+
+        self.dt_date = QDateEdit(ap.date); self.dt_date.setCalendarPopup(True)
+        form.addRow("Fecha:", self.dt_date)
+
+        self.sp_hour = QSpinBox(); self.sp_hour.setRange(0, 23); self.sp_hour.setValue(ap.start.hour())
+        self.sp_min  = QSpinBox(); self.sp_min.setRange(0, 59); self.sp_min.setSingleStep(5); self.sp_min.setValue(ap.start.minute())
+        hh = QHBoxLayout(); hh.addWidget(self.sp_hour); hh.addWidget(QLabel(":")); hh.addWidget(self.sp_min)
+        wrap_time = QFrame(); wrap_time.setLayout(hh)
+        form.addRow("Hora:", wrap_time)
+
+        self.sp_dur = QSpinBox(); self.sp_dur.setRange(15, 600); self.sp_dur.setSingleStep(15); self.sp_dur.setValue(ap.duration_min)
+        form.addRow("Duración (min):", self.sp_dur)
+
+        self.cbo_artist = QComboBox()
+        for a in artists:
+            self.cbo_artist.addItem(a.name, a.id)
+        self.cbo_artist.setCurrentIndex(max(0, self.cbo_artist.findData(ap.artist_id)))
+        form.addRow("Artista:", self.cbo_artist)
+
+        self.cb_client = QComboBox(); self.cb_client.setEditable(True); self.cb_client.setInsertPolicy(QComboBox.NoInsert)
+        for cid, cname in clients:
+            self.cb_client.addItem(cname, cid)
+        completer = QCompleter([n for _, n in clients], self.cb_client)
+        completer.setCaseSensitivity(Qt.CaseInsensitive); self.cb_client.setCompleter(completer)
+        self.cb_client.setCurrentText(ap.client_name or "")
+        form.addRow("Cliente:", self.cb_client)
+
+        self.ed_service = QPlainTextEdit(ap.service or ""); self.ed_service.setFixedHeight(80)
+        form.addRow("Servicio:", self.ed_service)
+
+        self.cbo_status = QComboBox(); self.cbo_status.addItems(["Activa", "En espera", "Completada", "Cancelada"])
+        self.cbo_status.setCurrentText(ap.status or "Activa")
+        form.addRow("Estado:", self.cbo_status)
+
+        self.body_l.addLayout(form)
+
+        btns = QHBoxLayout()
+        self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("cancelbtn")
+        self.btn_ok = QPushButton("Guardar"); self.btn_ok.setObjectName("okbtn")
+        self.btn_cancel.clicked.connect(self.reject); self.btn_ok.clicked.connect(self.accept)
+        btns.addStretch(1); btns.addWidget(self.btn_cancel); btns.addWidget(self.btn_ok)
+        self.body_l.addLayout(btns)
+
+    def values(self) -> dict:
+        date = self.dt_date.date()
+        h, m = self.sp_hour.value(), self.sp_min.value()
+        start = datetime(date.year(), date.month(), date.day(), h, m, 0)
+        dur   = self.sp_dur.value()
+        client_id = self.cb_client.currentData()
+        client_name = self.cb_client.currentText().strip()
+        return {
+            "artist_id": int(self.cbo_artist.currentData()),
+            "client_id": int(client_id) if client_id is not None else None,
+            "client_name": client_name or None,
+            "notes": (self.ed_service.toPlainText() or "").strip(),
+            "status": self.cbo_status.currentText(),
+            "start": start,
+            "end": start + timedelta(minutes=dur),
+        }
+    
+class PaymentDialog(_FramelessDialog):
+    """
+    Diálogo para registrar/editar el pago de una cita.
+    Devuelve un dict con:
+      - amount (float, MXN)
+      - commission_pct (float, 0-100)
+      - commission_amount (float, MXN)
+      - method (str)
+      - note (str)
+    """
+    def __init__(self, parent=None, preset: Optional[dict] = None, title="Cobro"):
+        super().__init__(title, parent)
+        preset = preset or {}
+
+        form = QFormLayout(); form.setContentsMargins(0,0,0,0)
+
+        # Monto total
+        self.sp_amount = QDoubleSpinBox()
+        self.sp_amount.setDecimals(2); self.sp_amount.setRange(0.00, 1_000_000.00)
+        self.sp_amount.setSingleStep(50.00)
+        self.sp_amount.setValue(float(preset.get("amount", 0.00)))
+        form.addRow("Precio:", self.sp_amount)
+
+        # Comisión (%)
+        self.sp_comm = QDoubleSpinBox()
+        self.sp_comm.setDecimals(2); self.sp_comm.setRange(0.00, 100.00)
+        self.sp_comm.setSingleStep(5.00)
+        self.sp_comm.setValue(float(preset.get("commission_pct", 0.00)))
+        form.addRow("Comisión (%):", self.sp_comm)
+
+        # Comisión calculada (sólo display)
+        self.lbl_comm_calc = QLabel("Comisión: $0.00"); self.lbl_comm_calc.setStyleSheet("background:transparent;")
+        form.addRow("", self.lbl_comm_calc)
+
+        # Método
+        self.cbo_method = QComboBox()
+        self.cbo_method.addItems(["Efectivo", "Tarjeta", "Transferencia", "Mixto"])
+        if preset.get("method"):
+            i = self.cbo_method.findText(str(preset["method"]), Qt.MatchFixedString)
+            if i >= 0: self.cbo_method.setCurrentIndex(i)
+        form.addRow("Método de pago:", self.cbo_method)
+
+        # Nota
+        self.ed_note = QPlainTextEdit()
+        self.ed_note.setPlaceholderText("Nota / referencia de cobro…")
+        self.ed_note.setFixedHeight(70)
+        self.ed_note.setPlainText(str(preset.get("note") or ""))
+        form.addRow("Nota:", self.ed_note)
+
+        self.body_l.addLayout(form)
+
+        # Botones
+        btns = QHBoxLayout()
+        self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("cancelbtn")
+        self.btn_ok = QPushButton("OK"); self.btn_ok.setObjectName("okbtn")
+        self.btn_cancel.clicked.connect(self.reject); self.btn_ok.clicked.connect(self.accept)
+        btns.addStretch(1); btns.addWidget(self.btn_cancel); btns.addWidget(self.btn_ok)
+        self.body_l.addLayout(btns)
+
+        # Recalcular comisión en vivo
+        def _recalc():
+            amount = float(self.sp_amount.value())
+            pct = float(self.sp_comm.value())
+            comm_amount = round(amount * pct / 100.0, 2)
+            self.lbl_comm_calc.setText(f"Comisión: ${comm_amount:,.2f}")
+        self.sp_amount.valueChanged.connect(_recalc)
+        self.sp_comm.valueChanged.connect(_recalc)
+        _recalc()
+
+    def values(self) -> dict:
+        amount = float(self.sp_amount.value())
+        pct = float(self.sp_comm.value())
+        comm_amount = round(amount * pct / 100.0, 2)
+        return {
+            "amount": amount,
+            "commission_pct": pct,
+            "commission_amount": comm_amount,
+            "method": self.cbo_method.currentText(),
+            "note": (self.ed_note.toPlainText() or "").strip(),
+            # bandera para permitir actualizar si ya hay transacción
+            "update_if_exists": True,
+        }
+
+# ==============================
+#   CHIP DE CITA (click/hover/menu)
+# ==============================
+
+class ApptChip(QFrame):
+    def __init__(self, ap: Appt, artist: Optional[Artist], controller: 'AgendaPage'):
+        super().__init__()
+        self.setAutoFillBackground(True)
+        self.ap = ap
+        self.artist = artist
+        self.controller = controller
+
+        lay = QVBoxLayout(self); lay.setContentsMargins(6, 4, 6, 4); lay.setSpacing(2)
+        text = f"{ap.client_name}\n{ap.service} • {ap.start.toString('hh:mm')}"
+        lbl = QLabel(text); lbl.setWordWrap(True); lbl.setToolTip(text); lay.addWidget(lbl)
+
+        color = artist.color if artist else "#666"
+        self.setStyleSheet(_status_style("", color, ap.status))
+
+
+    # Click izquierdo = abrir detalle
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.controller._open_appt_detail(self.ap)
+        super().mouseReleaseEvent(e)
+
+    # Menú contextual
+    def contextMenuEvent(self, e):
+        self.controller._show_appt_context_menu(self.ap, self.mapToGlobal(e.pos()))
 
 
 # ==============================
@@ -145,7 +517,28 @@ class AgendaPage(QWidget):
     crear_cita = pyqtSignal()
     abrir_cita = pyqtSignal(dict)
 
-    _PALETTE = ["#4ade80", "#60a5fa", "#f472b6", "#9d0dc1", "#f59e0b", "#22d3ee", "#a78bfa", "#34d399"]
+    def showEvent(self, e):
+        super().showEvent(e)
+        # Relee artistas y reconstruye sidebar (nuevos y/o colores)
+        self._load_artists_from_db()
+        self._rebuild_sidebar_artists()
+        self._refresh_all()
+
+    def _reload_colors_if_changed(self):
+        try:
+            p = _color_store_path()
+            mt = p.stat().st_mtime if p.exists() else 0
+            if mt != self._colors_mtime:
+                self._colors_mtime = mt
+                # Releer artistas (para aplicar colores) y reconstruir sidebar
+                self._load_artists_from_db()
+                # Sincroniza UI de la barra lateral si ya existe
+                if hasattr(self, "artists_checks_box"):
+                    self._rebuild_sidebar_artists()
+                self._rebuild_sidebar_artists()
+                self._refresh_all()
+        except Exception:
+            pass
 
     def __init__(self):
         super().__init__()
@@ -199,8 +592,15 @@ class AgendaPage(QWidget):
         self.list_view.tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_view.tbl.customContextMenuRequested.connect(self._show_list_context_menu)
         self.list_view.tbl.itemDoubleClicked.connect(self._open_from_list)
+        self._rebuild_sidebar_artists()
 
         self._refresh_all()
+        self._reload_colors_timer = QTimer(self)
+        self._reload_colors_timer.setInterval(3000)  # cada 3s
+        self._reload_colors_timer.timeout.connect(self._reload_colors_if_changed)
+        self._reload_colors_timer.start()
+        self._colors_mtime = None
+
 
     # ---------- Toolbar ----------
     def _build_toolbar(self) -> QWidget:
@@ -230,7 +630,6 @@ class AgendaPage(QWidget):
         self.cbo_view.setFixedHeight(36)
         self.cbo_view.setMinimumWidth(120)
         self.cbo_view.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        # Ajuste sutil para alineación vertical
         self.cbo_view.setStyleSheet("QComboBox{padding-top:2px;padding-bottom:2px;}")
         lay.addWidget(self.cbo_view)
 
@@ -249,33 +648,88 @@ class AgendaPage(QWidget):
         lay.addWidget(self.btn_new)
 
         return wrap
-
-    # ---------- Sidebar ----------
+    
     def _build_sidebar(self) -> QWidget:
         w = QFrame(); w.setObjectName("Sidebar")
         lay = QVBoxLayout(w); lay.setContentsMargins(12, 12, 12, 12); lay.setSpacing(12)
 
         def title(text: str) -> QLabel:
-            lbl = QLabel(text); lbl.setStyleSheet("background: transparent; font-weight: 600;"); return lbl
+            lbl = QLabel(text)
+            lbl.setStyleSheet("background: transparent; font-weight: 600;")
+            return lbl
 
-        self.search = QLineEdit(placeholderText="Buscar cliente…")
+        # Buscar
+        lay.addWidget(title("Buscar"))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Buscar cliente…")
         self.search.textChanged.connect(self._on_filter_changed)
-        lay.addWidget(title("Buscar")); lay.addWidget(self.search)
+        lay.addWidget(self.search)
 
-        lay.addWidget(title("Artistas"))
+        # Tatuadores (checkboxes)
+        lay.addWidget(title("Tatuadores"))
+        self.artists_checks_box = QVBoxLayout()
+        self.artists_checks_box.setContentsMargins(0, 0, 0, 0)
+        self.artists_checks_box.setSpacing(6)
+        lay.addLayout(self.artists_checks_box)
+
         self.artist_checks: Dict[str, QCheckBox] = {}
-        for a in self.artists:
-            chk = QCheckBox(a.name); chk.setChecked(True); chk.toggled.connect(self._on_filter_changed)
-            self.artist_checks[a.id] = chk; lay.addWidget(chk)
 
+        # Estado (se crea aquí pero NO disparamos refresh todavía)
         lay.addWidget(title("Estado"))
         self.cbo_status = QComboBox()
         self.cbo_status.addItems(["Todos", "Activa", "Completada", "Cancelada", "En espera"])
         self.cbo_status.currentTextChanged.connect(self._on_filter_changed)
         lay.addWidget(self.cbo_status)
 
+        # OJO: ya no llamamos a _rebuild_sidebar_artists() aquí para no refrescar
+        # antes de que existan self.day_view/self.week_view…
+
         lay.addStretch(1)
         return w
+
+    # ---------- Sidebar ----------
+    def _rebuild_sidebar_artists(self):
+        """
+        Reconstruye los checkboxes de 'Tatuadores' preservando la selección
+        cuando sea posible. Llama a este método cada que se recargan artistas/colores.
+        """
+        # Selección previa
+        prev_selected = {aid for aid, chk in getattr(self, "artist_checks", {}).items() if chk.isChecked()}
+
+        # Vaciar contenedor
+        while self.artists_checks_box.count():
+            item = self.artists_checks_box.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        self.artist_checks = {}
+
+        # Crear checkboxes con el color del artista en el indicador
+        for a in self.artists:
+            chk = QCheckBox(a.name)
+            chk.setChecked((a.id in prev_selected) or (not prev_selected))  # si no había selección previa, marcar todos
+            chk.toggled.connect(self._on_filter_changed)
+            chk.setStyleSheet(f"""
+                QCheckBox {{ background: transparent; }}
+                QCheckBox::indicator {{
+                    width: 14px; height: 14px;
+                    border: 1px solid rgba(255,255,255,0.35);
+                    border-radius: 3px;
+                    background: transparent;
+                }}
+                QCheckBox::indicator:checked {{
+                    background: {a.color};
+                    border-color: {a.color};
+                }}
+            """)
+            self.artist_checks[a.id] = chk
+            # los añadimos al layout contenedor
+            self.artists_checks_box.addWidget(chk)
+
+        # Reaplicar filtro con el nuevo mapa
+        self._on_filter_changed()
+
 
     # ---------- Navegación temporal ----------
     def _go_today(self): self.current_date = QDate.currentDate(); self.dp.setDate(self.current_date); self._refresh_all()
@@ -299,7 +753,8 @@ class AgendaPage(QWidget):
     def _on_filter_changed(self, *_):
         selected = [aid for aid, chk in self.artist_checks.items() if chk.isChecked()]
         self.selected_artist_ids = selected if len(selected) != len(self.artist_checks) else []
-        self.selected_status = self.cbo_status.currentText()
+        cbo = getattr(self, "cbo_status", None)
+        self.selected_status = cbo.currentText() if cbo else "Todos"
         self.search_text = (self.search.text() or "").strip().lower()
         self._refresh_all()
 
@@ -312,7 +767,7 @@ class AgendaPage(QWidget):
             except Exception:
                 rows = db.query(DBArtist.id, DBArtist.name).order_by(DBArtist.name.asc()).all()
         for idx, (aid, name) in enumerate(rows):
-            color = self._PALETTE[idx % len(self._PALETTE)]
+            color = _artist_color_for(int(aid), idx)
             self.artists.append(Artist(id=str(aid), name=name, color=color))
 
     def _load_clients_minimal(self):
@@ -401,7 +856,7 @@ class AgendaPage(QWidget):
         rows = sorted(self._filter_appts(), key=lambda a: (a.date.toJulianDay(), a.start.hour(), a.start.minute()))
         return rows[row] if 0 <= row < len(rows) else None
 
-    # ---------- Acciones ----------
+    # ---------- Acciones / popups ----------
     def _open_new_appt_dialog(self):
         dlg = NewApptDialog(self, self.artists, self._clients_cache, self.current_date)
         if dlg.exec_() != QDialog.Accepted:
@@ -411,7 +866,6 @@ class AgendaPage(QWidget):
         if not ensure_permission(self, "agenda", "create", owner_id=owner_id):
             return
 
-        # Si la BD requiere client_id not null, pedimos selección.
         if val.get("client_id") is None:
             QMessageBox.warning(self, "Nueva cita", "Selecciona un cliente de la lista.")
             return
@@ -423,7 +877,8 @@ class AgendaPage(QWidget):
                 "end": val["end"],
                 "notes": val["notes"],
                 "client_id": val["client_id"],
-                "client_name": val["client_name"],  # opcional si quieres conservar el nombre libre
+                "client_name": val["client_name"],
+                "status": val.get("status", "Activa"),
             })
             QMessageBox.information(self, "Cita", "Cita creada.")
             self._refresh_all()
@@ -434,7 +889,214 @@ class AgendaPage(QWidget):
         row = self.list_view.tbl.currentRow()
         ap = self._find_appt_by_row(row)
         if not ap: return
-        self.abrir_cita.emit({"id": int(ap.id), "client_id": ap.client_id, "artist_id": int(ap.artist_id)})
+        self._open_appt_detail(ap)
+
+    # Detalle
+    def _open_appt_detail(self, ap: Appt):
+        # Popup que se cierra al click fuera
+        dlg = _ClickAwayDialog("Detalle de cita", self)
+
+        form = QFormLayout(); form.setContentsMargins(0,0,0,0)
+        a = self._artist_by_id(ap.artist_id)
+        form.addRow("Cliente:", QLabel(ap.client_name))
+        form.addRow("Tatuador:", QLabel(a.name if a else ""))
+        form.addRow("Fecha:", QLabel(ap.date.toString("dd/MM/yyyy")))
+        form.addRow("Hora:", QLabel(ap.start.toString("hh:mm")))
+        form.addRow("Duración:", QLabel(f"{ap.duration_min} min"))
+        form.addRow("Estado:", QLabel(ap.status))
+        notes = QLabel(ap.service or "—"); notes.setWordWrap(True)
+        form.addRow("Servicio / nota:", notes)
+        dlg.body_l.addLayout(form)
+
+        # Botones
+        btns = QHBoxLayout()
+        b_edit = QPushButton("Editar"); b_state = QPushButton("Cambiar estado"); b_repg = QPushButton("Reprogramar")
+        b_del = QPushButton("Eliminar"); b_close = QPushButton("Cerrar")
+        for b in (b_edit, b_state, b_repg, b_del, b_close):
+            b.setObjectName("okbtn")
+        btns.addStretch(1); btns.addWidget(b_edit); btns.addWidget(b_state); btns.addWidget(b_repg); btns.addWidget(b_del); btns.addWidget(b_close)
+        dlg.body_l.addLayout(btns)
+
+        # Acciones
+        def do_edit():
+            dlg.close()
+            self._edit_appt(ap)
+
+        def do_state():
+            m = QMenu(dlg)
+            acts = {
+                "Activa": m.addAction("Activa"),
+                "En espera": m.addAction("En espera"),
+                "Completada": m.addAction("Completada"),
+                "Cancelada": m.addAction("Cancelada"),
+            }
+            chosen = m.exec_(QCursor.pos())
+            if not chosen: return
+            for k, v in acts.items():
+                if v is chosen:
+                    self._set_status(ap, k); break
+
+        def do_repg():
+            dlg.close()
+            self._edit_appt(ap, focus_time=True)
+
+        def do_del():
+            owner_id = int(ap.artist_id)
+            if not ensure_permission(self, "agenda", "delete", owner_id=owner_id):
+                return
+            try:
+                if delete_session:
+                    delete_session(int(ap.id))
+                else:
+                    cancel_session(int(ap.id))
+                QMessageBox.information(self, "Cita", "Cita eliminada.")
+            except Exception as e:
+                QMessageBox.critical(self, "Agenda", f"No se pudo eliminar: {e}")
+            self._refresh_all()
+            dlg.close()
+
+        b_edit.clicked.connect(do_edit)
+        b_state.clicked.connect(do_state)
+        b_repg.clicked.connect(do_repg)
+        b_del.clicked.connect(do_del)
+        b_close.clicked.connect(dlg.close)
+
+        dlg.exec_()
+
+    # Editar
+    def _edit_appt(self, ap: Appt, focus_time: bool = False):
+        owner_id = int(ap.artist_id)
+        if not ensure_permission(self, "agenda", "edit", owner_id=owner_id):
+            return
+
+        dlg = EditApptDialog(self, self.artists, self._clients_cache, ap)
+        if focus_time:
+            dlg.sp_hour.setFocus()
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        val = dlg.values()
+
+        try:
+            payload = {
+                "artist_id": val["artist_id"],
+                "start": val["start"],
+                "end": val["end"],
+                "notes": val["notes"],
+                "client_id": val["client_id"],
+                "client_name": val["client_name"],
+                "status": val["status"],
+            }
+            update_session(int(ap.id), payload)
+            # Ejecutar acción semántica si corresponde
+            if val["status"] == "Completada":
+                complete_session(int(ap.id), {})
+            elif val["status"] == "Cancelada":
+                cancel_session(int(ap.id))
+            QMessageBox.information(self, "Cita", "Cambios guardados.")
+        except Exception as e:
+            QMessageBox.critical(self, "Agenda", f"No se pudo guardar: {e}")
+        self._refresh_all()
+
+    # Estado directo
+    def _set_status(self, ap: Appt, status: str):
+        owner_id = int(ap.artist_id)
+        if not ensure_permission(self, "agenda", "edit", owner_id=owner_id):
+            return
+        try:
+            if status == "Completada":
+                complete_session(int(ap.id), {})
+            elif status == "Cancelada":
+                cancel_session(int(ap.id))
+            else:
+                update_session(int(ap.id), {"status": status})
+            QMessageBox.information(self, "Cita", "Estado actualizado.")
+        except Exception as e:
+            QMessageBox.critical(self, "Agenda", f"No se pudo actualizar: {e}")
+        self._refresh_all()
+
+    # Menú contextual directo desde chip
+    def _show_appt_context_menu(self, ap: Appt, global_pos: QPoint):
+        m = QMenu(self)
+        m.setStyleSheet("""
+            QMenu {
+                background: #1f242b;
+                border: 1px solid rgba(255,255,255,0.14);
+                padding: 6px;
+            }
+            QMenu::item {
+                padding: 6px 10px;
+                background: transparent;
+            }
+            QMenu::item:selected {
+                background: rgba(255,255,255,0.10);
+                border-radius: 6px;
+            }
+        """)
+        act_open = m.addAction("Ver detalles")
+        m.addSeparator()
+        act_edit = m.addAction("Editar (reprogramar)")
+        act_complete = m.addAction("Completar (cobrar)")
+        act_cancel = m.addAction("Cancelar")
+        act_state = m.addMenu("Cambiar estado")
+        a1 = act_state.addAction("Activa")
+        a2 = act_state.addAction("En espera")
+        a3 = act_state.addAction("Completada")
+        a4 = act_state.addAction("Cancelada")
+        m.addSeparator()
+        act_delete = m.addAction("Eliminar…")
+
+        chosen = m.exec_(global_pos)
+        if not chosen:
+            return
+
+        if chosen in (a1, a2, a3, a4):
+            self._set_status(ap, chosen.text()); return
+        if chosen is act_open:
+            self._open_appt_detail(ap); return
+        if chosen is act_edit:
+            self._edit_appt(ap); return
+        if chosen is act_complete:
+            if not ensure_permission(self, "agenda", "complete", owner_id=int(ap.artist_id)):
+                return
+            dlg = PaymentDialog(self)  # puedes pasar 'preset' si luego lees los datos actuales
+            if dlg.exec_() == QDialog.Accepted:
+                payload = dlg.values()
+                try:
+                    # primer intento normal
+                    complete_session(int(ap.id), payload)
+                    QMessageBox.information(self, "Cita", "Cobro registrado.")
+                except Exception as e:
+                    msg = str(e).lower()
+                    # si ya existía, ofrecemos ACTUALIZAR
+                    if "ya tiene transacción" in msg or "already has" in msg:
+                        ask = QMessageBox.question(
+                            self, "Editar cobro",
+                            "Esta cita ya tiene transacción.\n¿Actualizarla con los nuevos datos?"
+                        )
+                        if ask == QMessageBox.Yes:
+                            payload["update_if_exists"] = True
+                            try:
+                                complete_session(int(ap.id), payload)
+                                QMessageBox.information(self, "Cita", "Transacción actualizada.")
+                            except Exception as e2:
+                                QMessageBox.critical(self, "Cita", f"No se pudo actualizar: {e2}")
+                    else:
+                        QMessageBox.critical(self, "Cita", f"No se pudo completar: {e}")
+                self._refresh_all()
+            return
+
+        if chosen is act_cancel:
+            if not ensure_permission(self, "agenda", "cancel", owner_id=int(ap.artist_id)):
+                return
+            try:
+                cancel_session(int(ap.id))
+                QMessageBox.information(self, "Cita", "Cita cancelada.")
+            except Exception as e:
+                QMessageBox.critical(self, "Agenda", f"No se pudo cancelar: {e}")
+            self._refresh_all(); return
+        if chosen is act_delete:
+            self._open_appt_detail(ap)  # reutilizamos confirmaciones del detalle
+            return
 
     def _show_list_context_menu(self, pos: QPoint):
         row = self.list_view.tbl.rowAt(pos.y())
@@ -448,8 +1110,7 @@ class AgendaPage(QWidget):
         act_complete = menu.addAction("Completar (cobrar)")
         act_cancel = menu.addAction("Cancelar")
         act_noshow = menu.addAction("Marcar no-show")
-        act_block = menu.addAction("Bloqueo/Ausencia (no disponible)")
-        act_block.setEnabled(False)
+        act_block = menu.addAction("Bloqueo/Ausencia (no disponible)"); act_block.setEnabled(False)
 
         chosen = menu.exec_(self.list_view.tbl.viewport().mapToGlobal(pos))
         if not chosen:
@@ -461,29 +1122,33 @@ class AgendaPage(QWidget):
             self._open_from_list(); return
 
         if chosen is act_edit:
-            if not ensure_permission(self, "agenda", "edit", owner_id=owner_id):
-                return
-            try:
-                start_dt = datetime(ap.date.year(), ap.date.month(), ap.date.day(), ap.start.hour(), ap.start.minute()) + timedelta(hours=1)
-                end_dt   = start_dt + timedelta(minutes=ap.duration_min)
-                update_session(int(ap.id), {"start": start_dt, "end": end_dt})
-                QMessageBox.information(self, "Cita", "Cita reprogramada (+1h demo).")
-            except Exception as e:
-                QMessageBox.critical(self, "Agenda", f"No se pudo reprogramar: {e}")
-            self._refresh_all(); return
+            self._edit_appt(ap); return
 
         if chosen is act_complete:
             if not ensure_permission(self, "agenda", "complete", owner_id=owner_id):
                 return
             dlg = PaymentDialog(self)
             if dlg.exec_() == QDialog.Accepted:
+                payload = dlg.values()
                 try:
-                    complete_session(int(ap.id), {"method": dlg.method()})
-                    QMessageBox.information(self, "Cita", "Cita completada y registrada en caja.")
+                    complete_session(int(ap.id), payload)
+                    QMessageBox.information(self, "Cita", "Cobro registrado.")
                 except Exception as e:
-                    QMessageBox.critical(self, "Agenda", f"No se pudo completar: {e}")
+                    msg = str(e).lower()
+                    if "ya tiene transacción" in msg or "already has" in msg:
+                        if QMessageBox.question(self, "Editar cobro",
+                            "Esta cita ya tiene transacción.\n¿Actualizarla con los nuevos datos?") == QMessageBox.Yes:
+                            payload["update_if_exists"] = True
+                            try:
+                                complete_session(int(ap.id), payload)
+                                QMessageBox.information(self, "Cita", "Transacción actualizada.")
+                            except Exception as e2:
+                                QMessageBox.critical(self, "Cita", f"No se pudo actualizar: {e2}")
+                    else:
+                        QMessageBox.critical(self, "Cita", f"No se pudo completar: {e}")
                 self._refresh_all()
             return
+
 
         if chosen is act_cancel:
             if not ensure_permission(self, "agenda", "cancel", owner_id=owner_id):
@@ -594,7 +1259,7 @@ class DayView(QWidget):
         self.tbl.verticalHeader().setVisible(False)
         self.tbl.setEditTriggers(self.tbl.NoEditTriggers); self.tbl.setSelectionMode(self.tbl.NoSelection)
         self.tbl.setStyleSheet("QHeaderView::section { background: transparent; }")
-        # Scroll en píxeles para poder compensar la línea "ahora"
+        # Scroll en píxeles para poder compensar la línea “ahora”
         self.tbl.setVerticalScrollMode(self.tbl.ScrollPerPixel)
         self.tbl.setHorizontalScrollMode(self.tbl.ScrollPerPixel)
         grid.addWidget(self.tbl, stretch=1)
@@ -656,7 +1321,7 @@ class DayView(QWidget):
         self.tbl_hours.setHorizontalHeaderItem(0, QTableWidgetItem(""))
         t = QTime(self.day_start)
         for r in range(steps):
-            show = t.toString("hh:mm") if t.minute() == 0 else t.toString("hh:mm")  # mostraremos ambas
+            show = t.toString("hh:mm") if t.minute() == 0 else t.toString("hh:mm")
             it = QTableWidgetItem(show if t.minute() in (0, 30) else "")
             if t.minute() == 30:
                 it.setForeground(QColor("#9aa0a6"))  # tono atenuado
@@ -676,14 +1341,10 @@ class DayView(QWidget):
             row_start = int(self.day_start.secsTo(ap.start) / 60 // self.step_min)
             row_span  = max(1, ap.duration_min // self.step_min)
 
-            chip = QFrame(); chip.setAutoFillBackground(True); chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            lay = QVBoxLayout(chip); lay.setContentsMargins(6, 4, 6, 4)
-            text = f"{ap.client_name}\n{ap.service} • {ap.start.toString('hh:mm')}"
-            lbl = QLabel(text); lbl.setWordWrap(True); lbl.setToolTip(text); lay.addWidget(lbl)
-
-            a = artist_lookup(ap.artist_id); base = a.color if a else "#666666"
-            chip.setStyleSheet(f"background:{base};border:1px solid rgba(0,0,0,0.18);border-radius:6px;color:white;")
-            self.tbl.setSpan(row_start, col, row_span, 1); self.tbl.setCellWidget(row_start, col, chip)
+            a = artist_lookup(ap.artist_id)
+            chip = ApptChip(ap, a, self.parent)
+            self.tbl.setSpan(row_start, col, row_span, 1)
+            self.tbl.setCellWidget(row_start, col, chip)
 
     def _update_now_line(self):
         """Coloca la línea roja de 'ahora' con precisión de minutos y corrige scroll/anchos."""
@@ -724,7 +1385,7 @@ class WeekView(QWidget):
         self.date = QDate.currentDate(); self.day_start = QTime(8,0); self.day_end = QTime(22,0); self.step_min = 30
         self.artist_id = None
 
-        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
         self.subtitle = QLabel(""); self.subtitle.setStyleSheet("color:#888; background: transparent;")
         lay.addWidget(self.subtitle)
 
@@ -823,14 +1484,10 @@ class WeekView(QWidget):
             row_start = int(self.day_start.secsTo(ap.start) / 60 // self.step_min)
             row_span  = max(1, ap.duration_min // self.step_min)
 
-            chip = QFrame(); chip.setAutoFillBackground(True); chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            lay = QVBoxLayout(chip); lay.setContentsMargins(6,4,6,4)
-            text = f"{ap.client_name}\n{ap.service} • {ap.start.toString('hh:mm')}"
-            lbl = QLabel(text); lbl.setWordWrap(True); lbl.setToolTip(text); lay.addWidget(lbl)
-
-            a = artist_lookup(ap.artist_id); base = a.color if a else "#666666"
-            chip.setStyleSheet(f"background:{base};border:1px solid rgba(0,0,0,0.18);border-radius:6px;color:white;")
-            self.tbl.setSpan(row_start, col, row_span, 1); self.tbl.setCellWidget(row_start, col, chip)
+            a = artist_lookup(ap.artist_id)
+            chip = ApptChip(ap, a, self.parent)
+            self.tbl.setSpan(row_start, col, row_span, 1)
+            self.tbl.setCellWidget(row_start, col, chip)
 
     def _update_now_line(self):
         self.now_line_main.hide(); self.now_line_hours.hide()

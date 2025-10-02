@@ -1,9 +1,13 @@
+# ui/pages/reports.py
 from __future__ import annotations
 
 from datetime import datetime, time
 from collections import defaultdict
+from pathlib import Path
+import json
+import os
 
-from PyQt5.QtCore import Qt, QDate
+from PyQt5.QtCore import Qt, QDate, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QComboBox,
     QDateEdit, QTableWidget, QTableWidgetItem, QSizePolicy, QSpacerItem,
@@ -11,7 +15,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush
 
-# --------- Gráfica (opcional si está disponible) ---------
+# --------- Gráfica (si está disponible) ---------
 try:
     from PyQt5.QtChart import (
         QChart, QChartView, QLineSeries, QCategoryAxis, QValueAxis
@@ -28,55 +32,95 @@ from data.models.client import Client
 from data.models.artist import Artist as DBArtist
 
 # ---- Permisos / sesión ----
-from services.permissions import (
-    assistant_needs_code, verify_master_code, elevate_for
-)
+from services.permissions import assistant_needs_code, verify_master_code, elevate_for
 from services.contracts import get_current_user
 
 
+# ================= utilidades visuales =================
+
 def _qcolor(c):
-    """Acepta '#RRGGBB' o QColor y devuelve QColor."""
     return c if isinstance(c, QColor) else QColor(c)
 
-
-# Paleta discreta para tema oscuro (líneas)
-_LINE_COLORS = [
-    "#6ea8fe", "#75b798", "#e685b5", "#ffda6a",
-    "#a1c6ff", "#9ec5fe", "#8fd1b8", "#ffb8d2",
-    "#ffd166", "#b197fc",
-]
-
-# ---------- Helpers de UI ----------
-
 def _transparent(widget):
-    """QLabels/controles sin fondo para respetar el tema."""
+    """Aplica fondo transparente sin romper QSS actual."""
     try:
         ss = widget.styleSheet() or ""
-        if "background" not in ss:
+        if "background" not in ss and "background-color" not in ss:
             widget.setStyleSheet(ss + (";" if ss else "") + "background: transparent;")
     except Exception:
         pass
 
 
-def _chip(texto: str, checked: bool = False, on=None) -> QPushButton:
-    """Botón tipo 'chip' (toggle) usado en filtros de periodo."""
-    b = QPushButton(texto)
-    b.setCheckable(True)
-    b.setChecked(checked)
-    b.setMinimumHeight(28)
-    b.setObjectName("GhostSmall")
-    if callable(on):
-        b.clicked.connect(on)
-    return b
+# ================ colores por artista (JSON + fallback) ================
 
+# MISMA paleta que usamos en Agenda/Staff (coherencia)
+_PALETTE = [
+    "#4ade80", "#60a5fa", "#f472b6", "#9d0dc1",
+    "#f59e0b", "#22d3ee", "#a78bfa", "#34d399",
+    "#ffd166", "#b197fc",
+]
 
-def _icon_chip(prefix: str, btn: QPushButton) -> QPushButton:
-    """Prefija un emoji/icono y ajusta tamaños."""
-    if prefix:
-        btn.setText(f"{prefix}  {btn.text()}")
-    btn.setMinimumHeight(32)
-    btn.setObjectName("GhostSmall")
-    return btn
+def _candidate_color_paths() -> list[Path]:
+    """
+    Buscamos el JSON de colores en rutas conocidas:
+    - env TATTOO_COLORS
+    - ./assets/artist_colors.json  ← estándar del proyecto
+    - ./artist_colors.json
+    - ./data/artist_colors.json
+    - %USERPROFILE%/.tattoo_studio/artist_colors.json
+    """
+    env = os.environ.get("TATTOO_COLORS")
+    base = Path(os.getcwd())
+    paths = [
+        Path(env) if env else None,
+        base / "assets" / "artist_colors.json",
+        base / "artist_colors.json",
+        base / "data" / "artist_colors.json",
+        Path.home() / ".tattoo_studio" / "artist_colors.json",
+    ]
+    out, seen = [], set()
+    for p in paths:
+        if not p:
+            continue
+        try:
+            p = p.resolve()
+        except Exception:
+            pass
+        if p in seen:
+            continue
+        seen.add(p)
+        if p.exists():
+            out.append(p)
+    return out
+
+def _parse_colors_dict(raw: dict) -> dict[str, str]:
+    """
+    Acepta formatos:
+      { "12": "#ff00aa", "Dylan Bourjac": "#e922e6" }
+      { "colors": { ... } }
+      o { "<id>": {"hex":"#..."} }
+    """
+    if not isinstance(raw, dict):
+        return {}
+    if "colors" in raw and isinstance(raw["colors"], dict):
+        raw = raw["colors"]
+    out = {}
+    for k, v in raw.items():
+        if isinstance(v, dict) and "hex" in v:
+            v = v.get("hex")
+        if isinstance(v, str) and v.strip():
+            out[str(k)] = v.strip()
+    return out
+
+def _load_colors_from_json() -> tuple[dict[str, str], float | None]:
+    """Devuelve (mapa_colores, mtime_de_archivo_o_None)."""
+    for p in _candidate_color_paths():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8")) or {}
+            return _parse_colors_dict(data), p.stat().st_mtime
+        except Exception:
+            continue
+    return {}, None
 
 
 # ============================== Página ==============================
@@ -84,17 +128,16 @@ def _icon_chip(prefix: str, btn: QPushButton) -> QPushButton:
 class ReportsPage(QWidget):
     """
     Reportes financieros con:
-      - Periodos: Hoy / Semana / Mes / Rango personalizado (chips)
-      - Filtros: Artista, Método de pago
-      - Layout lado a lado: izquierda Transacciones (scroll infinito),
-        derecha Gráfica + totales (más ancha)
-      - Exportar CSV (Admin libre; Assistant con código; Artist no)
+      - Filtros por periodo, tatuador, método de pago
+      - Tabla + Gráfica (colores = JSON por ID/nombre, fallback paleta)
+      - Export CSV (permisos)
+      - Auto-refresh (transacciones, artistas y JSON de colores)
     """
 
     def __init__(self):
         super().__init__()
 
-        # ---- Estado de filtros/UI ----
+        # ---- Estado global ----
         self.period = "today"              # today | week | month | custom
         self.filter_artist = "Todos"
         self.filter_payment = "Todos"
@@ -106,9 +149,12 @@ class ReportsPage(QWidget):
         self._role = self._user.get("role") or "artist"
         self._user_artist_id = self._user.get("artist_id")
 
-        # Artistas para combos
-        self._artists = self._fetch_artists()  # [(id, name)]
+        # Artistas (activos) para combos y series
+        self._artists: list[tuple[int, str]] = self._fetch_artists(active_only=True)
         self._artist_names = [n for _, n in self._artists]
+
+        # Colores desde JSON (+ mtime para hot-reload)
+        self._colors_json, self._colors_mtime = _load_colors_from_json()
 
         # ---------------- Layout raíz ----------------
         root = QVBoxLayout(self)
@@ -121,15 +167,14 @@ class ReportsPage(QWidget):
         _transparent(title)
         root.addWidget(title)
 
-        # ---------------- Periodos + Export (misma barra) ----------------
+        # ---------------- Periodos + Export ----------------
         pr_wrap = QFrame(); pr_wrap.setObjectName("Toolbar")
         period_row = QHBoxLayout(pr_wrap); period_row.setSpacing(8); period_row.setContentsMargins(10, 8, 10, 8)
 
-        self.btn_today  = _chip("Hoy", checked=True, on=lambda: self._set_period("today"))
-        self.btn_week   = _chip("Esta semana", on=lambda: self._set_period("week"))
-        self.btn_month  = _chip("Este mes", on=lambda: self._set_period("month"))
-        self.btn_custom = _chip("Seleccionar fechas", on=lambda: self._set_period("custom"))
-
+        self.btn_today  = self._chip("Hoy", checked=True, on=lambda: self._set_period("today"))
+        self.btn_week   = self._chip("Esta semana", on=lambda: self._set_period("week"))
+        self.btn_month  = self._chip("Este mes", on=lambda: self._set_period("month"))
+        self.btn_custom = self._chip("Seleccionar fechas", on=lambda: self._set_period("custom"))
         for b in (self.btn_today, self.btn_week, self.btn_month, self.btn_custom):
             period_row.addWidget(b)
 
@@ -142,25 +187,22 @@ class ReportsPage(QWidget):
         self.dt_to = QDateEdit(QDate.currentDate()); self.dt_to.setCalendarPopup(True); cb.addWidget(self.dt_to)
         self.custom_box.setVisible(False)
         period_row.addWidget(self.custom_box)
-
         self.dt_from.dateChanged.connect(self._on_custom_dates)
         self.dt_to.dateChanged.connect(self._on_custom_dates)
 
-        # Espaciador y Export a la derecha (misma barra)
         period_row.addSpacerItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
         self.btn_export = QPushButton("Exportar CSV")
         self.btn_export.clicked.connect(self._export_csv)
-        period_row.addWidget(_icon_chip("📁", self.btn_export))
+        period_row.addWidget(self._icon_chip("📁", self.btn_export))
         root.addWidget(pr_wrap)
 
-        # Habilitar export conforme permisos
         self._refresh_export_enabled()
 
         # ---------------- Filtros ----------------
         flt_wrap = QFrame(); flt_wrap.setObjectName("Toolbar")
         filters = QHBoxLayout(flt_wrap); filters.setSpacing(8); filters.setContentsMargins(10, 8, 10, 8)
 
-        la = QLabel("Artista:"); _transparent(la); filters.addWidget(la)
+        lt = QLabel("Tatuador:"); _transparent(lt); filters.addWidget(lt)
         self.cbo_artist = QComboBox()
         self.cbo_artist.addItems(["Todos"] + self._artist_names)
         self.cbo_artist.currentTextChanged.connect(self._on_filters)
@@ -184,7 +226,7 @@ class ReportsPage(QWidget):
                 self.cbo_artist.setCurrentText(own_name)
                 self.cbo_artist.setEnabled(False)
 
-        # =================== LADO IZQ (Tabla) + LADO DER (KPI/Gráfica) ===================
+        # =================== LADO IZQ (Tabla) + LADO DER (Gráfica) ===================
         side = QHBoxLayout(); side.setSpacing(12)
 
         # -------- Izquierda: Transacciones --------
@@ -194,13 +236,13 @@ class ReportsPage(QWidget):
         lbl_tx = QLabel("Transacciones"); _transparent(lbl_tx); left.addWidget(lbl_tx)
 
         self.tbl = QTableWidget(0, 5)
-        self.tbl.setHorizontalHeaderLabels(["Fecha", "Cliente", "Monto", "Pago", "Artista"])
+        self.tbl.setHorizontalHeaderLabels(["Fecha", "Cliente", "Monto", "Pago", "Tatuador"])
         self.tbl.horizontalHeader().setStretchLastSection(True)
         self.tbl.setEditTriggers(self.tbl.NoEditTriggers)
         self.tbl.setSelectionBehavior(self.tbl.SelectRows)
         left.addWidget(self.tbl, 1)
 
-        # -------- Derecha: KPI + Gráfica (más ancha) --------
+        # -------- Derecha: KPI + Gráfica --------
         right_card = QFrame(); right_card.setObjectName("Card")
         right = QVBoxLayout(right_card); right.setContentsMargins(16, 12, 16, 12); right.setSpacing(8)
 
@@ -223,8 +265,7 @@ class ReportsPage(QWidget):
             self.chart = QChart()
             self.chart.setBackgroundVisible(False)
             self.chart.legend().setVisible(True)
-            self.chart.legend().setAlignment(Qt.AlignLeft)
-            # Legibilidad en tema oscuro
+            self.chart.legend().setAlignment(Qt.AlignBottom)  # << leyenda abajo, horizontal
             self.chart.legend().setLabelBrush(QBrush(QColor("#DADDE3")))
             self.chart_view = QChartView(self.chart)
             self.chart_view.setRenderHint(QPainter.Antialiasing)
@@ -236,22 +277,58 @@ class ReportsPage(QWidget):
             nochart = QLabel("La gráfica no está disponible en este entorno.")
             nochart.setStyleSheet("opacity:0.7;")
             nochart.setAlignment(Qt.AlignCenter)
+            _transparent(nochart)
             cbl.addWidget(nochart)
         right.addWidget(self.chart_box, 1)
 
-        # Añadir a layout principal lado a lado (gráfica más ancha)
+        # Añadir a layout principal
         side.addWidget(left_card, 1)   # Transacciones
         side.addWidget(right_card, 2)  # Gráfica
         root.addLayout(side, 1)
 
+        # Timers de auto-refresh
+        self._data_timer = QTimer(self)
+        self._data_timer.setInterval(6000)         # cada 6s: reconsulta y repinta
+        self._data_timer.timeout.connect(self._tick_auto_refresh)
+        self._data_timer.start()
+
+        self._colors_timer = QTimer(self)
+        self._colors_timer.setInterval(2500)       # detecta cambios en JSON de colores
+        self._colors_timer.timeout.connect(self._reload_colors_if_changed)
+        self._colors_timer.start()
+
         # Primera carga
         self._refresh()
 
+    # ---------------- Helpers de UI ----------------
+
+    def _chip(self, texto: str, checked: bool = False, on=None) -> QPushButton:
+        b = QPushButton(texto)
+        b.setCheckable(True)
+        b.setChecked(checked)
+        b.setMinimumHeight(28)
+        b.setObjectName("GhostSmall")
+        if callable(on):
+            b.clicked.connect(on)
+        return b
+
+    def _icon_chip(self, prefix: str, btn: QPushButton) -> QPushButton:
+        if prefix:
+            btn.setText(f"{prefix}  {btn.text()}")
+        btn.setMinimumHeight(32)
+        btn.setObjectName("GhostSmall")
+        return btn
+
     # ---------------- Helpers de datos/consulta ----------------
-    def _fetch_artists(self):
+
+    def _fetch_artists(self, active_only: bool = True):
+        """[(id, name)] desde la BD (por defecto solo activos)."""
         with SessionLocal() as db:
-            rows = db.query(DBArtist.id, DBArtist.name).order_by(DBArtist.name.asc()).all()
-        return [(r[0], r[1]) for r in rows]
+            q = db.query(DBArtist.id, DBArtist.name)
+            if active_only:
+                q = q.filter(DBArtist.active == True)  # noqa: E712
+            rows = q.order_by(DBArtist.name.asc()).all()
+        return [(int(r[0]), str(r[1])) for r in rows]
 
     def _artist_name_by_id(self, a_id):
         for i, n in self._artists:
@@ -265,14 +342,27 @@ class ReportsPage(QWidget):
                 return i
         return None
 
+    def _artist_color(self, artist_id: int, artist_name: str, idx_fallback: int) -> str:
+        """
+        Color del artista priorizando JSON:
+          1) JSON por id (str)
+          2) JSON por nombre
+          3) Paleta _PALETTE
+        """
+        c = self._colors_json.get(str(artist_id))
+        if c:
+            return c
+        c = self._colors_json.get(artist_name)
+        if c:
+            return c
+        return _PALETTE[idx_fallback % len(_PALETTE)]
+
     def _period_text(self) -> str:
-        if self.period == "today":
-            return "Hoy"
-        if self.period == "week":
-            return "Esta semana"
-        if self.period == "month":
-            return "Este mes"
-        return f"{self.custom_from.toString('dd/MM/yyyy')} — {self.custom_to.toString('dd/MM/yyyy')}"
+        return {
+            "today": "Hoy",
+            "week": "Esta semana",
+            "month": "Este mes",
+        }.get(self.period, f"{self.custom_from.toString('dd/MM/yyyy')} — {self.custom_to.toString('dd/MM/yyyy')}")
 
     def _date_range(self):
         today = QDate.currentDate()
@@ -289,7 +379,7 @@ class ReportsPage(QWidget):
         return min(self.custom_from, self.custom_to), max(self.custom_from, self.custom_to)
 
     def _query_rows(self):
-        """Regresa tuplas (QDate, cliente, monto, método, artista) según filtros/periodo/permisos."""
+        """Tuplas (QDate, cliente, monto, método, artista_name, artista_id)."""
         q_from, q_to = self._date_range()
         start_dt = datetime.combine(q_from.toPyDate(), time(0, 0, 0))
         end_dt = datetime.combine(q_to.toPyDate(), time(23, 59, 59))
@@ -297,8 +387,12 @@ class ReportsPage(QWidget):
         with SessionLocal() as db:
             q = (
                 db.query(
-                    Transaction.date, Client.name, Transaction.amount,
-                    Transaction.method, DBArtist.name, Transaction.artist_id
+                    Transaction.date,
+                    Client.name,
+                    Transaction.amount,
+                    Transaction.method,
+                    DBArtist.name,
+                    Transaction.artist_id,
                 )
                 .join(TattooSession, TattooSession.id == Transaction.session_id)
                 .join(Client, Client.id == TattooSession.client_id)
@@ -306,17 +400,17 @@ class ReportsPage(QWidget):
                 .filter(Transaction.date >= start_dt, Transaction.date <= end_dt)
             )
 
-            # Permiso: si es ARTIST, solo lo propio
+            # ARTIST -> sólo lo propio
             if self._role == "artist" and self._user_artist_id:
                 q = q.filter(Transaction.artist_id == self._user_artist_id)
             else:
-                # Filtro combo artista (por nombre) si aplica
+                # filtro por tatuador (combo)
                 if self.filter_artist != "Todos":
                     a_id = self._artist_id_by_name(self.filter_artist)
-                    if a_id:
+                    if a_id is not None:
                         q = q.filter(Transaction.artist_id == a_id)
 
-            # Filtro método de pago
+            # filtro por tipo de pago
             if self.filter_payment != "Todos":
                 q = q.filter(Transaction.method == self.filter_payment)
 
@@ -324,26 +418,27 @@ class ReportsPage(QWidget):
             rows = q.all()
 
         out = []
-        for dt, cli, amount, method, artist_name, _artist_id in rows:
+        for dt, cli, amount, method, artist_name, artist_id in rows:
             qd = QDate(dt.year, dt.month, dt.day)
-            out.append((qd, cli or "—", float(amount or 0.0), method or "—", artist_name or "—"))
+            out.append((qd, cli or "—", float(amount or 0.0), method or "—", artist_name or "—", int(artist_id or 0)))
         return out
 
     # ---------------- Render principal ----------------
+
     def _refresh(self):
         rows = self._query_rows()
 
-        # Tabla (SIN paginación: todas las transacciones)
+        # Tabla
         self.tbl.setRowCount(0)
-        for r in rows:
-            row = self.tbl.rowCount(); self.tbl.insertRow(row)
-            self.tbl.setItem(row, 0, QTableWidgetItem(r[0].toString("dd/MM/yyyy")))
-            self.tbl.setItem(row, 1, QTableWidgetItem(r[1]))
-            self.tbl.setItem(row, 2, QTableWidgetItem(f"${r[2]:,.2f}"))
-            self.tbl.setItem(row, 3, QTableWidgetItem(r[3]))
-            self.tbl.setItem(row, 4, QTableWidgetItem(r[4]))
+        for qd, cli, amt, pay, art_name, _art_id in rows:
+            r = self.tbl.rowCount(); self.tbl.insertRow(r)
+            self.tbl.setItem(r, 0, QTableWidgetItem(qd.toString("dd/MM/yyyy")))
+            self.tbl.setItem(r, 1, QTableWidgetItem(cli))
+            self.tbl.setItem(r, 2, QTableWidgetItem(f"${amt:,.2f}"))
+            self.tbl.setItem(r, 3, QTableWidgetItem(pay))
+            self.tbl.setItem(r, 4, QTableWidgetItem(art_name))
 
-        # Total
+        # Total y periodo
         total = sum(r[2] for r in rows)
         self.lbl_total.setText(f"${total:,.2f}")
         self.lbl_date.setText(self._period_text())
@@ -353,13 +448,14 @@ class ReportsPage(QWidget):
             b.setChecked(False)
         {"today": self.btn_today, "week": self.btn_week, "month": self.btn_month, "custom": self.btn_custom}[self.period].setChecked(True)
 
-        # Gráfica de líneas (minimal)
+        # Gráfica
         self._render_chart_lines(rows)
 
-        # Export habilitado/visible según permisos
+        # Permisos export
         self._refresh_export_enabled()
 
-    # ---------------- Gráfica de líneas por artista ----------------
+    # ---------------- Gráfica de líneas por tatuador ----------------
+
     def _render_chart_lines(self, rows):
         if not _HAVE_QCHART:
             return
@@ -370,33 +466,56 @@ class ReportsPage(QWidget):
             self.chart.removeAxis(ax)
         self.chart.setTitle("")
 
-        if not rows:
-            return
-
-        # Armar categorías de días en el rango seleccionado
+        # Armar categorías de días en el rango
         q_from, q_to = self._date_range()
-        n_days = q_from.daysTo(q_to) + 1
+        n_days = max(1, q_from.daysTo(q_to) + 1)
         days = [q_from.addDays(i) for i in range(n_days)]
         categories = [d.toString("dd/MM") for d in days]
         x_index = {d.toString("yyyy-MM-dd"): i for i, d in enumerate(days)}
 
-        # Totales por artista y por día
+        # Totales por artista_id/día (y nombre para leyenda)
         by_artist_day = defaultdict(lambda: defaultdict(float))
-        for qd, _cli, amount, _pay, artist in rows:
+        artist_names = {}
+        for qd, _cli, amount, _pay, artist_name, artist_id in rows:
             key = qd.toString("yyyy-MM-dd")
+            artist_names[artist_id] = artist_name
             if key in x_index:
-                by_artist_day[artist][key] += amount
+                by_artist_day[artist_id][key] += amount
 
-        # Crear series
+        # ¿filtrar a un solo tatuador?
+        include_only = None
+        if self.filter_artist != "Todos":
+            include_only = self._artist_id_by_name(self.filter_artist)
+
+        # Usar SOLO artistas activos
+        self._artists = self._fetch_artists(active_only=True)
+
+        # Orden por nombre para leyenda estable
+        ordered_artists = sorted(self._artists, key=lambda t: t[1])
+
         series_list = []
-        for s_idx, (artist, per_day) in enumerate(sorted(by_artist_day.items())):
+        for s_idx, (artist_id, name) in enumerate(ordered_artists):
+            if include_only is not None and artist_id != include_only:
+                continue
+
+            per_day = by_artist_day.get(artist_id, {})
+
+            # Si no hay datos (>0) en el rango, no lo muestres (evita líneas planas)
+            if not any(v > 0 for v in per_day.values()):
+                # salvo que esté filtrado explícitamente
+                if include_only is None:
+                    continue
+
             line = QLineSeries()
-            line.setName(artist)
-            pen = QPen(_qcolor(_LINE_COLORS[s_idx % len(_LINE_COLORS)]))
-            pen.setWidth(2)
+            line.setName(name)
+
+            # Color desde JSON (id -> nombre -> paleta)
+            col_hex = self._artist_color(artist_id, name, s_idx)
+            pen = QPen(_qcolor(col_hex)); pen.setWidth(2)
             line.setPen(pen)
             line.setPointsVisible(True)
 
+            # Puntos para todos los días (cero si no hay)
             for d in days:
                 k = d.toString("yyyy-MM-dd")
                 x = x_index[k]
@@ -406,12 +525,13 @@ class ReportsPage(QWidget):
             series_list.append(line)
             self.chart.addSeries(line)
 
-        # Eje X categórico
+        # Eje X categórico — evitar '...' mostrando etiquetas espaciadas
         axisX = QCategoryAxis()
+        step = max(1, len(categories) // 10)  # ~10 etiquetas visibles
         for i, label in enumerate(categories):
-            axisX.append(label, float(i))
+            if i % step == 0 or i == len(categories) - 1:
+                axisX.append(label, float(i))
         axisX.setLabelsBrush(QBrush(QColor("#DADDE3")))
-        # Minimalismo: sin grid vertical, etiquetas un poco inclinadas si hay muchos días
         axisX.setGridLineVisible(False)
         if len(categories) > 14:
             axisX.setLabelsAngle(-45)
@@ -421,7 +541,6 @@ class ReportsPage(QWidget):
         axisY.setLabelFormat("$%.0f")
         axisY.applyNiceNumbers()
         axisY.setLabelsBrush(QBrush(QColor("#DADDE3")))
-        # Minimalismo: grid suave
         axisY.setMinorGridLineVisible(False)
         axisY.setGridLineColor(QColor(255, 255, 255, 30))
 
@@ -433,6 +552,7 @@ class ReportsPage(QWidget):
             s.attachAxis(axisY)
 
     # ---------------- Interacciones ----------------
+
     def _set_period(self, p: str):
         self.period = p
         self.custom_box.setVisible(p == "custom")
@@ -448,16 +568,61 @@ class ReportsPage(QWidget):
         self.filter_payment = self.cbo_payment.currentText()
         self._refresh()
 
+    # ---------------- Auto-refresh & eventos ----------------
+
+    def showEvent(self, e):
+        """Al volver a la pestaña recargamos artistas, colores y datos."""
+        super().showEvent(e)
+        self._reload_artists_combo()
+        self._reload_colors_if_changed()
+        self._refresh()
+
+    def _tick_auto_refresh(self):
+        """
+        Pulso cada 6s:
+          - refresca artistas (altas/bajas)
+          - reconsulta transacciones (pagos nuevos)
+          - repinta gráfica con colores actuales del JSON/paleta
+        """
+        self._reload_artists_combo()
+        self._refresh()
+
+    def _reload_colors_if_changed(self):
+        """Si cambió el JSON de colores, recarga y repinta."""
+        colors, mtime = _load_colors_from_json()
+        if mtime != self._colors_mtime:
+            self._colors_mtime = mtime
+            self._colors_json = colors
+            self._refresh()
+
+    def _reload_artists_combo(self):
+        """Sincroniza el combo de Tatuador con la BD preservando selección actual (solo activos)."""
+        prev = self.cbo_artist.currentText() if self.cbo_artist.count() else "Todos"
+        self._artists = self._fetch_artists(active_only=True)
+        names = [n for _, n in self._artists]
+        self.cbo_artist.blockSignals(True)
+        self.cbo_artist.clear()
+        self.cbo_artist.addItems(["Todos"] + names)
+        if self._role == "artist" and self._user_artist_id:
+            # Los artistas ven solo su propio nombre (combo bloqueado)
+            own_name = self._artist_name_by_id(self._user_artist_id)
+            if own_name:
+                self.cbo_artist.setCurrentText(own_name)
+        else:
+            if prev in names or prev == "Todos":
+                self.cbo_artist.setCurrentText(prev)
+        self.cbo_artist.blockSignals(False)
+
     # ---------------- Exportar ----------------
+
     def _refresh_export_enabled(self):
-        # Admin siempre; Artist nunca; Assistant sólo si puede elevar permisos
+        # Admin siempre; Artist nunca; Assistant con elevación
         if self._role == "artist":
             self.btn_export.setEnabled(False)
             return
         if self._role == "admin":
             self.btn_export.setEnabled(True)
             return
-        # assistant -> habilita botón, validamos en el click
         if self._role == "assistant":
             self.btn_export.setEnabled(True)
             return
@@ -469,31 +634,25 @@ class ReportsPage(QWidget):
         if not assistant_needs_code("reports", "export"):
             return True
 
-        # Pedir código
         code, ok = QInputDialog.getText(self, "Código maestro", "Ingresa el código para exportar:", echo=QLineEdit.Password)
         if not ok or not code:
             return False
 
-        # Verificar con BD
         with SessionLocal() as db:
             if not verify_master_code(code, db):
                 QMessageBox.warning(self, "Permiso denegado", "Código incorrecto.")
                 return False
 
-        # Elevar 5 minutos
         elevate_for(self._user.get("id"), minutes=5)
         return True
 
     def _export_csv(self):
-        # Permisos: admin libre; assistant con elevación; artist nunca
         if self._role == "artist":
             QMessageBox.information(self, "Sin permiso", "Tu rol no puede exportar reportes.")
             return
-
         if self._role == "assistant" and not self._ensure_assistant_elevation():
             return
 
-        # Recolectar datos completos
         rows = self._query_rows()
         if not rows:
             QMessageBox.information(self, "Exportar", "No hay datos para exportar.")
@@ -507,8 +666,8 @@ class ReportsPage(QWidget):
             import csv
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Fecha", "Cliente", "Monto", "Pago", "Artista"])
-                for qd, cli, amt, pay, art in rows:
+                w.writerow(["Fecha", "Cliente", "Monto", "Pago", "Tatuador"])
+                for qd, cli, amt, pay, art, _aid in rows:
                     w.writerow([qd.toString("yyyy-MM-dd"), cli, f"{amt:.2f}", pay, art])
             QMessageBox.information(self, "Exportar", "Archivo CSV exportado correctamente.")
         except Exception as e:
