@@ -8,7 +8,9 @@ class Transaction(Base):
     __tablename__ = "transactions"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), unique=True)
+    
+    # Eliminamos unique=True para permitir múltiples transacciones por sesión
+    session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"))
     artist_id: Mapped[int] = mapped_column(ForeignKey("artists.id", ondelete="RESTRICT"), index=True)
 
     amount: Mapped[float] = mapped_column(Float)  # total cobrado
@@ -17,5 +19,7 @@ class Transaction(Base):
     commission_amount: Mapped[Optional[float]] = mapped_column(Float, default=None)
     deleted_flag: Mapped[bool] = mapped_column(Boolean, default=False)  # soft delete
 
+    # data/models/transaction.py
     session = relationship("TattooSession", back_populates="transaction")
+
     artist = relationship("Artist")
