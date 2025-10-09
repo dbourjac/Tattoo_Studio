@@ -3,16 +3,10 @@ from __future__ import annotations
 # ============================================================
 # client_detail.py — Ficha de cliente (BD real + RBAC + edición)
 #
-# Cambios en esta versión:
-# - Admin puede editar/guardar sin fricción.
-# - Assistant puede editar/guardar y eliminar con elevación (código maestro).
-# - Artista no puede editar ni eliminar (solo lectura).
-# - Botón Eliminar en rojo (fallback inline, y soporta QSS vía objectName "Danger").
-# - Avatar recortado a círculo (con borde); admin siempre puede reemplazar;
-#   assistant puede reemplazar si es dueño de la imagen o con elevación.
-# - Señal cliente_cambiado() para que MainWindow/Clients recarguen la tabla.
-# - Refrescos tras guardar/archivar/eliminar -> regresa a lista y actualiza.
-# - Dirty check en edición.
+# Optimización:
+# - Instagram unificado: render_instagram (mostrar con @) y normalize_instagram (guardar sin @).
+# - Avatar circular usando round_pixmap (mismo resultado visual, reutilizando helper central).
+# - Sin cambios de lógica, permisos ni layout.
 # ============================================================
 
 from typing import Optional, List, Tuple
@@ -39,7 +33,13 @@ from data.models.session_tattoo import TattooSession
 
 from services.permissions import can
 from services.contracts import get_current_user
-from ui.pages.common import ensure_permission, request_elevation_if_needed
+from ui.pages.common import (
+    ensure_permission,
+    request_elevation_if_needed,
+    round_pixmap,            # ← avatar circular
+    render_instagram,        # ← mostrar @usuario
+    normalize_instagram,     # ← guardar sin @
+)
 
 
 class ClientDetailPage(QWidget):
@@ -51,6 +51,7 @@ class ClientDetailPage(QWidget):
     # --------------------------------------------------------
     def __init__(self):
         super().__init__()
+        # Fondo transparente para labels (consistencia visual)
         self.setStyleSheet("QLabel { background: transparent; }")
 
         self._client: dict = {}
@@ -142,7 +143,7 @@ class ClientDetailPage(QWidget):
         self.name_edit.textChanged.connect(self._mark_dirty)
         info.addWidget(self.name_edit)
 
-        # Badges (placeholder; estado/etiqueta visual)
+        # Badges (estado/etiqueta visual)
         badges = QHBoxLayout(); badges.setSpacing(6)
         self.badge_tag = QLabel(" — ")
         self.badge_tag.setObjectName("BadgeRole")
@@ -248,7 +249,10 @@ class ClientDetailPage(QWidget):
         self.badge_state.setText(f" {client.get('estado','—') or '—'} ")
         self.phone_lbl.setText(client.get("tel") or "—"); self.phone_edit.setText(client.get("tel") or "")
         self.email_lbl.setText(client.get("email") or "—"); self.email_edit.setText(client.get("email") or "")
-        self.ig_lbl.setText(client.get("ig") or client.get("instagram") or "—"); self.ig_edit.setText(client.get("ig") or client.get("instagram") or "")
+        # Instagram: mostrar con @
+        ig_val = client.get("ig") or client.get("instagram") or ""
+        self.ig_lbl.setText(render_instagram(ig_val) if ig_val else "—")
+        self.ig_edit.setText(render_instagram(ig_val) if ig_val else "")
         self.artist_lbl.setText(client.get("artista") or "—")
         self.next_lbl.setText(client.get("proxima") or "—")
         self._perfil_name.setText(name_hint)
@@ -284,7 +288,9 @@ class ClientDetailPage(QWidget):
                 ig    = getattr(self._client_db, "instagram", None)
                 self.phone_lbl.setText(phone or "—"); self.phone_edit.setText(phone or "")
                 self.email_lbl.setText(email or "—"); self.email_edit.setText(email or "")
-                self.ig_lbl.setText(ig or "—");       self.ig_edit.setText(ig or "")
+                # Instagram: mostrar con @
+                self.ig_lbl.setText(render_instagram(ig) if ig else "—")
+                self.ig_edit.setText(render_instagram(ig) if ig else "")
                 self._perfil_name.setText(name)
                 self._perfil_contact.setText(f"{phone or '—'}  ·  {email or '—'}")
 
@@ -520,8 +526,8 @@ class ClientDetailPage(QWidget):
         self._emerg_tel_edit  = QLineEdit(); self._emerg_tel_edit.setVisible(False);  self._emerg_tel_edit.textChanged.connect(self._mark_dirty)
 
         form.addRow("Nombre:", self._emerg_name); form.addRow("", self._emerg_name_edit)
-        form.addRow("Relación:", self._emerg_rel); form.addRow("", self._emerg_rel_edit)
-        form.addRow("Teléfono:", self._emerg_tel); form.addRow("", self._emerg_tel_edit)
+        form.addRow("Relación:", self._emerg_rel);  form.addRow("", self._emerg_rel_edit)
+        form.addRow("Teléfono:", self._emerg_tel);  form.addRow("", self._emerg_tel_edit)
         lay.addWidget(box)
         lay.addStretch(1)
 
@@ -563,28 +569,6 @@ class ClientDetailPage(QWidget):
         meta = up / f"{client_id}.meta.json"
         return png, meta
 
-    def _circularize(self, pm: QPixmap, size: int) -> QPixmap:
-        """Recorta el pixmap a un círculo con borde sutil."""
-        if pm.isNull():
-            return pm
-        target = QPixmap(size, size)
-        target.fill(Qt.transparent)
-        painter = QPainter(target)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-
-        path = QPainterPath()
-        path.addEllipse(QRectF(0, 0, size, size))
-        painter.setClipPath(path)
-
-        scaled = pm.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        painter.drawPixmap(0, 0, scaled)
-
-        painter.setClipping(False)
-        painter.setPen(QColor(0, 0, 0, 40))  # borde sutil (se ve bien en ambos temas)
-        painter.drawEllipse(0, 0, size-1, size-1)
-        painter.end()
-        return target
-
     def _load_avatar_or_initials(self, client_id: Optional[int], name: str) -> QPixmap:
         if client_id:
             png, meta = self._avatar_paths(client_id)
@@ -597,7 +581,7 @@ class ClientDetailPage(QWidget):
                     except Exception:
                         pass
                 pm = QPixmap(str(png))
-                return self._circularize(pm, 72)
+                return round_pixmap(pm, 72)  # ← helper centralizado
         return self._make_avatar_pixmap(72, name)
 
     def _set_avatar_perm(self, client_id: Optional[int]):
@@ -606,7 +590,7 @@ class ClientDetailPage(QWidget):
             self.btn_avatar.setEnabled(False)
             return
         png, _ = self._avatar_paths(client_id)
-        if not png.exists():  # cualquiera puede subir si no hay (se respetará elevación para assistant al cambiar)
+        if not png.exists():  # cualquiera puede subir si no hay (assistant con elevación)
             self.btn_avatar.setEnabled(True)
             return
         if user.get("role") == "admin":
@@ -624,7 +608,7 @@ class ClientDetailPage(QWidget):
 
         # Reglas:
         # - Admin: siempre puede.
-        # - Si NO hay imagen previa: cualquiera puede (pero si es assistant, pedimos elevación).
+        # - Si NO hay imagen previa: cualquiera puede (assistant requiere elevación).
         # - Si hay imagen previa:
         #       dueño o admin -> ok
         #       assistant -> requiere elevación
@@ -665,7 +649,7 @@ class ClientDetailPage(QWidget):
             if pm.isNull():
                 raise ValueError("Archivo de imagen no válido.")
             pm = pm.scaled(512, 512, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-            pm = self._circularize(pm, 512)
+            pm = round_pixmap(pm, 512)  # ← helper centralizado
             pm.save(str(png), "PNG")
             meta.write_text(json.dumps({"owner_user_id": user.get("id")}, ensure_ascii=False), encoding="utf-8")
             self._avatar_owner_user_id = user.get("id")
@@ -861,7 +845,9 @@ class ClientDetailPage(QWidget):
                 obj.name = self.name_edit.text().strip()
                 obj.phone = self.phone_edit.text().strip()
                 obj.email = self.email_edit.text().strip() or None
-                obj.instagram = self.ig_edit.text().strip() or None
+                # Instagram: guardar sin @
+                ig_text = (self.ig_edit.text() or "").strip()
+                obj.instagram = normalize_instagram(ig_text) or None
 
                 obj.city = self._pref_city_edit.text().strip() or None
                 obj.state = self._pref_state_edit.text().strip() or None

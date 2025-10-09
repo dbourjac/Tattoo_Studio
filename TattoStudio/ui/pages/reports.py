@@ -1,11 +1,7 @@
-# ui/pages/reports.py
 from __future__ import annotations
 
 from datetime import datetime, time
 from collections import defaultdict
-from pathlib import Path
-import json
-import os
 
 from PyQt5.QtCore import Qt, QDate, QTimer
 from PyQt5.QtWidgets import (
@@ -35,6 +31,9 @@ from data.models.artist import Artist as DBArtist
 from services.permissions import assistant_needs_code, verify_master_code, elevate_for
 from services.contracts import get_current_user
 
+# ---- Helpers centralizados (common.py) ----
+from ui.pages.common import load_artist_colors, fallback_color_for
+
 
 # ================= utilidades visuales =================
 
@@ -49,78 +48,6 @@ def _transparent(widget):
             widget.setStyleSheet(ss + (";" if ss else "") + "background: transparent;")
     except Exception:
         pass
-
-
-# ================ colores por artista (JSON + fallback) ================
-
-# MISMA paleta que usamos en Agenda/Staff (coherencia)
-_PALETTE = [
-    "#4ade80", "#60a5fa", "#f472b6", "#9d0dc1",
-    "#f59e0b", "#22d3ee", "#a78bfa", "#34d399",
-    "#ffd166", "#b197fc",
-]
-
-def _candidate_color_paths() -> list[Path]:
-    """
-    Buscamos el JSON de colores en rutas conocidas:
-    - env TATTOO_COLORS
-    - ./assets/artist_colors.json  ← estándar del proyecto
-    - ./artist_colors.json
-    - ./data/artist_colors.json
-    - %USERPROFILE%/.tattoo_studio/artist_colors.json
-    """
-    env = os.environ.get("TATTOO_COLORS")
-    base = Path(os.getcwd())
-    paths = [
-        Path(env) if env else None,
-        base / "assets" / "artist_colors.json",
-        base / "artist_colors.json",
-        base / "data" / "artist_colors.json",
-        Path.home() / ".tattoo_studio" / "artist_colors.json",
-    ]
-    out, seen = [], set()
-    for p in paths:
-        if not p:
-            continue
-        try:
-            p = p.resolve()
-        except Exception:
-            pass
-        if p in seen:
-            continue
-        seen.add(p)
-        if p.exists():
-            out.append(p)
-    return out
-
-def _parse_colors_dict(raw: dict) -> dict[str, str]:
-    """
-    Acepta formatos:
-      { "12": "#ff00aa", "Dylan Bourjac": "#e922e6" }
-      { "colors": { ... } }
-      o { "<id>": {"hex":"#..."} }
-    """
-    if not isinstance(raw, dict):
-        return {}
-    if "colors" in raw and isinstance(raw["colors"], dict):
-        raw = raw["colors"]
-    out = {}
-    for k, v in raw.items():
-        if isinstance(v, dict) and "hex" in v:
-            v = v.get("hex")
-        if isinstance(v, str) and v.strip():
-            out[str(k)] = v.strip()
-    return out
-
-def _load_colors_from_json() -> tuple[dict[str, str], float | None]:
-    """Devuelve (mapa_colores, mtime_de_archivo_o_None)."""
-    for p in _candidate_color_paths():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8")) or {}
-            return _parse_colors_dict(data), p.stat().st_mtime
-        except Exception:
-            continue
-    return {}, None
 
 
 # ============================== Página ==============================
@@ -153,8 +80,8 @@ class ReportsPage(QWidget):
         self._artists: list[tuple[int, str]] = self._fetch_artists(active_only=True)
         self._artist_names = [n for _, n in self._artists]
 
-        # Colores desde JSON (+ mtime para hot-reload)
-        self._colors_json, self._colors_mtime = _load_colors_from_json()
+        # Colores desde JSON (centralizado en common.py)
+        self._colors_json: dict[str, str] = load_artist_colors()
 
         # ---------------- Layout raíz ----------------
         root = QVBoxLayout(self)
@@ -265,7 +192,7 @@ class ReportsPage(QWidget):
             self.chart = QChart()
             self.chart.setBackgroundVisible(False)
             self.chart.legend().setVisible(True)
-            self.chart.legend().setAlignment(Qt.AlignBottom)  # << leyenda abajo, horizontal
+            self.chart.legend().setAlignment(Qt.AlignBottom)  # leyenda abajo, horizontal
             self.chart.legend().setLabelBrush(QBrush(QColor("#DADDE3")))
             self.chart_view = QChartView(self.chart)
             self.chart_view.setRenderHint(QPainter.Antialiasing)
@@ -344,10 +271,10 @@ class ReportsPage(QWidget):
 
     def _artist_color(self, artist_id: int, artist_name: str, idx_fallback: int) -> str:
         """
-        Color del artista priorizando JSON:
+        Color del artista priorizando JSON (common.load_artist_colors):
           1) JSON por id (str)
           2) JSON por nombre
-          3) Paleta _PALETTE
+          3) fallback_color_for(idx)
         """
         c = self._colors_json.get(str(artist_id))
         if c:
@@ -355,7 +282,7 @@ class ReportsPage(QWidget):
         c = self._colors_json.get(artist_name)
         if c:
             return c
-        return _PALETTE[idx_fallback % len(_PALETTE)]
+        return fallback_color_for(idx_fallback)
 
     def _period_text(self) -> str:
         return {
@@ -475,10 +402,8 @@ class ReportsPage(QWidget):
 
         # Totales por artista_id/día (y nombre para leyenda)
         by_artist_day = defaultdict(lambda: defaultdict(float))
-        artist_names = {}
         for qd, _cli, amount, _pay, artist_name, artist_id in rows:
             key = qd.toString("yyyy-MM-dd")
-            artist_names[artist_id] = artist_name
             if key in x_index:
                 by_artist_day[artist_id][key] += amount
 
@@ -500,16 +425,15 @@ class ReportsPage(QWidget):
 
             per_day = by_artist_day.get(artist_id, {})
 
-            # Si no hay datos (>0) en el rango, no lo muestres (evita líneas planas)
-            if not any(v > 0 for v in per_day.values()):
-                # salvo que esté filtrado explícitamente
-                if include_only is None:
-                    continue
+            # Si no hay datos (>0) en el rango, no lo muestres (evita líneas planas),
+            # salvo que esté filtrado explícitamente
+            if not any(v > 0 for v in per_day.values()) and include_only is None:
+                continue
 
             line = QLineSeries()
             line.setName(name)
 
-            # Color desde JSON (id -> nombre -> paleta)
+            # Color desde JSON (id -> nombre -> fallback)
             col_hex = self._artist_color(artist_id, name, s_idx)
             pen = QPen(_qcolor(col_hex)); pen.setWidth(2)
             line.setPen(pen)
@@ -589,10 +513,9 @@ class ReportsPage(QWidget):
 
     def _reload_colors_if_changed(self):
         """Si cambió el JSON de colores, recarga y repinta."""
-        colors, mtime = _load_colors_from_json()
-        if mtime != self._colors_mtime:
-            self._colors_mtime = mtime
-            self._colors_json = colors
+        new_map = load_artist_colors()
+        if new_map != self._colors_json:
+            self._colors_json = new_map
             self._refresh()
 
     def _reload_artists_combo(self):

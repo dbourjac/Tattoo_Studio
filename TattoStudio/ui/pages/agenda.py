@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, time
 import csv
 import os
 from pathlib import Path
-import json
 
 from PyQt5.QtCore import Qt, QDate, QTime, QPoint, pyqtSignal, QTimer, QEvent
 from PyQt5.QtGui import QFontMetrics, QColor, QPainter, QPainterPath, QPixmap, QMouseEvent, QCursor
@@ -35,6 +34,11 @@ from data.models.artist import Artist as DBArtist
 # Permisos centralizados (elevación incluida)
 from ui.pages.common import ensure_permission
 
+# Helpers compartidos (optimización: sin duplicar lógica de colores/menús)
+from ui.pages.common import (
+    artist_colors_path, load_artist_colors, fallback_color_for, NoStatusTipMenu
+)
+
 
 # ==============================
 #   MODELOS DE UI (DTOs)
@@ -61,38 +65,21 @@ class Appt:
 
 
 # ==============================
-#   HELPERS COLORES / ASSETS
+#   COLORES (centralizado)
 # ==============================
-
-_DEFAULT_PALETTE = [
-    "#7C3AED", "#0EA5E9", "#10B981", "#F59E0B",
-    "#EF4444", "#06B6D4", "#A855F7", "#84CC16",
-    "#EAB308", "#F97316"
-]
-
-def _project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-def _color_store_path() -> Path:
-    p = _project_root() / "assets"
-    p.mkdir(parents=True, exist_ok=True)
-    return p / "artist_colors.json"
-
-def _load_overrides() -> Dict[str, str]:
-    p = _color_store_path()
-    if not p.exists():
-        return {}
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
 def _artist_color_for(aid: int, idx_fallback: int) -> str:
-    ov = _load_overrides()
-    key = str(int(aid))
-    if key in ov:
-        return ov[key]
-    return _DEFAULT_PALETTE[idx_fallback % len(_DEFAULT_PALETTE)]
+    """
+    Obtiene color por ID desde artist_colors.json (vía common.load_artist_colors()),
+    si no existe usa fallback_color_for(idx_fallback) para mantener paleta consistente.
+    """
+    try:
+        ov = load_artist_colors()
+        key = str(int(aid)).lower()
+        if key in ov and ov[key]:
+            return ov[key]
+    except Exception:
+        pass
+    return fallback_color_for(idx_fallback)
 
 
 # ==============================
@@ -264,6 +251,7 @@ class _ClickAwayDialog(_FramelessDialog):
             pass
         super().focusOutEvent(e)
 
+
 class NewApptDialog(_FramelessDialog):
     """Diálogo de nueva cita con autocompletado de clientes."""
     def __init__(self, parent, artists: List[Artist], clients: List[Tuple[int, str]], default_date: QDate):
@@ -394,7 +382,8 @@ class EditApptDialog(_FramelessDialog):
             "start": start,
             "end": start + timedelta(minutes=dur),
         }
-    
+
+
 class PaymentDialog(_FramelessDialog):
     """
     Diálogo para registrar/editar el pago de una cita.
@@ -478,6 +467,7 @@ class PaymentDialog(_FramelessDialog):
             "update_if_exists": True,
         }
 
+
 # ==============================
 #   CHIP DE CITA (click/hover/menu)
 # ==============================
@@ -496,7 +486,6 @@ class ApptChip(QFrame):
 
         color = artist.color if artist else "#666"
         self.setStyleSheet(_status_style("", color, ap.status))
-
 
     # Click izquierdo = abrir detalle
     def mouseReleaseEvent(self, e):
@@ -526,13 +515,13 @@ class AgendaPage(QWidget):
 
     def _reload_colors_if_changed(self):
         try:
-            p = _color_store_path()
+            # Usamos la misma ruta centralizada de common.py
+            p = Path(artist_colors_path())
             mt = p.stat().st_mtime if p.exists() else 0
             if mt != self._colors_mtime:
                 self._colors_mtime = mt
                 # Releer artistas (para aplicar colores) y reconstruir sidebar
                 self._load_artists_from_db()
-                # Sincroniza UI de la barra lateral si ya existe
                 if hasattr(self, "artists_checks_box"):
                     self._rebuild_sidebar_artists()
                 self._rebuild_sidebar_artists()
@@ -601,7 +590,6 @@ class AgendaPage(QWidget):
         self._reload_colors_timer.start()
         self._colors_mtime = None
 
-
     # ---------- Toolbar ----------
     def _build_toolbar(self) -> QWidget:
         wrap = QFrame(); wrap.setObjectName("Toolbar")
@@ -648,7 +636,7 @@ class AgendaPage(QWidget):
         lay.addWidget(self.btn_new)
 
         return wrap
-    
+
     def _build_sidebar(self) -> QWidget:
         w = QFrame(); w.setObjectName("Sidebar")
         lay = QVBoxLayout(w); lay.setContentsMargins(12, 12, 12, 12); lay.setSpacing(12)
@@ -680,9 +668,6 @@ class AgendaPage(QWidget):
         self.cbo_status.addItems(["Todos", "Activa", "Completada", "Cancelada", "En espera"])
         self.cbo_status.currentTextChanged.connect(self._on_filter_changed)
         lay.addWidget(self.cbo_status)
-
-        # OJO: ya no llamamos a _rebuild_sidebar_artists() aquí para no refrescar
-        # antes de que existan self.day_view/self.week_view…
 
         lay.addStretch(1)
         return w
@@ -724,12 +709,10 @@ class AgendaPage(QWidget):
                 }}
             """)
             self.artist_checks[a.id] = chk
-            # los añadimos al layout contenedor
             self.artists_checks_box.addWidget(chk)
 
         # Reaplicar filtro con el nuevo mapa
         self._on_filter_changed()
-
 
     # ---------- Navegación temporal ----------
     def _go_today(self): self.current_date = QDate.currentDate(); self.dp.setDate(self.current_date); self._refresh_all()
@@ -923,7 +906,7 @@ class AgendaPage(QWidget):
             self._edit_appt(ap)
 
         def do_state():
-            m = QMenu(dlg)
+            m = NoStatusTipMenu(dlg)  # <-- evita limpiar el status bar
             acts = {
                 "Activa": m.addAction("Activa"),
                 "En espera": m.addAction("En espera"),
@@ -1016,7 +999,7 @@ class AgendaPage(QWidget):
 
     # Menú contextual directo desde chip
     def _show_appt_context_menu(self, ap: Appt, global_pos: QPoint):
-        m = QMenu(self)
+        m = NoStatusTipMenu(self)  # <-- reemplazo de QMenu
         m.setStyleSheet("""
             QMenu {
                 background: #1f242b;
@@ -1103,7 +1086,7 @@ class AgendaPage(QWidget):
         ap = self._find_appt_by_row(row)
         if not ap: return
 
-        menu = QMenu(self)
+        menu = NoStatusTipMenu(self)  # <-- reemplazo de QMenu
         act_open = menu.addAction("Abrir ficha")
         menu.addSeparator()
         act_edit = menu.addAction("Editar (reprogramar)")
@@ -1148,7 +1131,6 @@ class AgendaPage(QWidget):
                         QMessageBox.critical(self, "Cita", f"No se pudo completar: {e}")
                 self._refresh_all()
             return
-
 
         if chosen is act_cancel:
             if not ensure_permission(self, "agenda", "cancel", owner_id=owner_id):

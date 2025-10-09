@@ -16,7 +16,7 @@ from data.models.artist import Artist
 from datetime import datetime
 
 # RBAC (UI helper)
-from ui.pages.common import ensure_permission
+from ui.pages.common import ensure_permission, normalize_instagram
 
 import unicodedata
 
@@ -62,14 +62,14 @@ class NewClientPage(QWidget):
         root.addWidget(title)
 
         # ---- Tabs ----
-        tabs = QTabWidget()
-        tabs.addTab(self._tab_identificacion_contacto(), "Identificación")
-        tabs.addTab(self._tab_preferencias(), "Preferencias")
-        tabs.addTab(self._tab_salud(), "Salud")
-        tabs.addTab(self._tab_consentimientos(), "Consentimientos")
-        tabs.addTab(self._tab_emergencia(), "Emergencia")
-        tabs.addTab(self._tab_notas_archivos(), "Notas")
-        root.addWidget(tabs, stretch=1)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._tab_identificacion_contacto(), "Identificación")
+        self.tabs.addTab(self._tab_preferencias(), "Preferencias")
+        self.tabs.addTab(self._tab_salud(), "Salud")
+        self.tabs.addTab(self._tab_consentimientos(), "Consentimientos")
+        self.tabs.addTab(self._tab_emergencia(), "Emergencia")
+        self.tabs.addTab(self._tab_notas_archivos(), "Notas")
+        root.addWidget(self.tabs, stretch=1)
 
         # ---- Barra de botones (footer) ----
         btn_bar = QHBoxLayout()
@@ -107,6 +107,9 @@ class NewClientPage(QWidget):
             p.resize(1060, 1000)
             p.setSizeGripEnabled(True)
 
+        # Refresca artistas (por si hubo altas/bajas/cambios de nombre)
+        self._reload_artists_combo()
+
     # ---------- Tabs ----------
     def _tab_identificacion_contacto(self) -> QWidget:
         w = QWidget()
@@ -140,7 +143,8 @@ class NewClientPage(QWidget):
         box_ct = QGroupBox("Contacto")
         form_ct = QFormLayout(box_ct); form_ct.setLabelAlignment(Qt.AlignRight)
         self.in_tel = QLineEdit();    self.in_tel.setPlaceholderText("Teléfono principal *")
-        self.in_ig = QLineEdit();     self.in_ig.setPlaceholderText("Instagram (opcional)")
+        self.in_ig = QLineEdit();     self.in_ig.setPlaceholderText("@usuario (opcional)")
+        self.in_ig.textChanged.connect(self._enforce_instagram_prefix)  # UX: muestra siempre con @, guarda sin @
         self.in_mail = QLineEdit();   self.in_mail.setPlaceholderText("Correo (opcional)")
         self.in_ciudad = QLineEdit(); self.in_ciudad.setPlaceholderText("Ciudad (opcional)")
         self.in_estado = QLineEdit(); self.in_estado.setPlaceholderText("Estado (opcional)")
@@ -162,7 +166,8 @@ class NewClientPage(QWidget):
 
         box_pref = QGroupBox("Preferencias del cliente")
         form_p = QFormLayout(box_pref); form_p.setLabelAlignment(Qt.AlignRight)
-        self.cb_artista = QComboBox(); self.cb_artista.addItems(["Sin preferencia", "Dylan", "Jesús", "Pablo", "Alex"])
+        self.cb_artista = QComboBox()
+        self.cb_artista.addItem("Sin preferencia", None)  # se llena desde BD en showEvent()
 
         self.lst_estilos = QListWidget(); self.lst_estilos.setSelectionMode(QListWidget.MultiSelection)
         for estilo in ["Línea fina", "Realismo", "Tradicional", "Acuarela", "Geométrico", "Blackwork", "Anime"]:
@@ -284,6 +289,22 @@ class NewClientPage(QWidget):
         self.chk_consent_info.stateChanged.connect(update_enabled)
         update_enabled()
 
+    def _enforce_instagram_prefix(self, text: str):
+        """UX: en el input se ve con '@'; al guardar se normaliza sin '@'."""
+        if not text:
+            return
+        if not text.startswith("@"):
+            self.in_ig.blockSignals(True)
+            self.in_ig.setText("@" + text.replace("@", ""))
+            self.in_ig.blockSignals(False)
+        else:
+            head, tail = text[0], text[1:].replace("@", "")
+            fixed = head + tail
+            if fixed != text:
+                self.in_ig.blockSignals(True)
+                self.in_ig.setText(fixed)
+                self.in_ig.blockSignals(False)
+
     # ============================================================
     # Guardado real + Permisos
     # ============================================================
@@ -309,7 +330,8 @@ class NewClientPage(QWidget):
             "name": full_name,
             "phone": self.in_tel.text().strip() or None,
             "email": self.in_mail.text().strip() or None,
-            "instagram": self.in_ig.text().strip() or None,
+            # Instagram: guardar normalizado sin '@'
+            "instagram": normalize_instagram(self.in_ig.text().strip()) or None,
             "city": self.in_ciudad.text().strip() or None,
             "state": self.in_estado.text().strip() or None,
             "notes": notes,
@@ -435,3 +457,22 @@ class NewClientPage(QWidget):
         self.btn_guardar.setEnabled(enabled)
         self.btn_guardar_agendar.setEnabled(enabled)
         self.btn_cancelar.setEnabled(enabled)
+
+    # ========= Artistas (combo dinámico desde BD; refresca en showEvent) =========
+    def _reload_artists_combo(self):
+        try:
+            with SessionLocal() as db:
+                rows = db.query(Artist).filter(Artist.active == True).order_by(Artist.name.asc()).all()  # noqa: E712
+                current = self.cb_artista.currentText() if self.cb_artista.count() else "Sin preferencia"
+                self.cb_artista.blockSignals(True)
+                self.cb_artista.clear()
+                self.cb_artista.addItem("Sin preferencia", None)
+                for a in rows:
+                    self.cb_artista.addItem(a.name, a.id)
+                # restaurar selección si aplica
+                if current and any(current == self.cb_artista.itemText(i) for i in range(self.cb_artista.count())):
+                    self.cb_artista.setCurrentText(current)
+                self.cb_artista.blockSignals(False)
+        except Exception:
+            # Silencioso: si algo falla, se queda al menos "Sin preferencia"
+            pass

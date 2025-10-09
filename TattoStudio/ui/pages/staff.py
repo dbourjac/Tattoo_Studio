@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import List, Dict, Optional
 from pathlib import Path
-import json
 
 from PyQt5.QtCore import Qt, pyqtSignal, QSize, QRect, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QColor, QPainterPath
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QScrollArea,
-    QFrame, QSizePolicy, QLayout, QStyle, QToolButton, QMenu, QGraphicsDropShadowEffect
+    QFrame, QSizePolicy, QStyle, QToolButton, QGraphicsDropShadowEffect, QMenu,
+    QTableWidgetItem
 )
 
 # BD
@@ -20,113 +20,25 @@ from data.models.artist import Artist
 # Sesión actual (para RBAC)
 from services.contracts import get_current_user
 
-
-# --------------------------- FlowLayout (wrap auto) ---------------------------
-class FlowLayout(QLayout):
-    def __init__(self, parent=None, margin=0, hspacing=16, vspacing=16):
-        super().__init__(parent)
-        self._items = []
-        self._hspace = hspacing
-        self._vspace = vspacing
-        self.setContentsMargins(margin, margin, margin, margin)
-
-    def addItem(self, item): self._items.append(item)
-    def count(self): return len(self._items)
-    def itemAt(self, index): return self._items[index] if 0 <= index < len(self._items) else None
-    def takeAt(self, index): return self._items.pop(index) if 0 <= index < len(self._items) else None
-    def expandingDirections(self): return Qt.Orientations(Qt.Orientation(0))
-    def hasHeightForWidth(self): return True
-    def heightForWidth(self, width): return self._do_layout(QRect(0, 0, width, 0), True)
-    def setGeometry(self, rect): super().setGeometry(rect); self._do_layout(rect, False)
-    def sizeHint(self): return self.minimumSize()
-
-    def minimumSize(self):
-        size = QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        l,t,r,b = self.getContentsMargins()
-        size += QSize(l + r, t + b)
-        return size
-
-    def _smart_spacing(self, pm):
-        if self.parent():
-            return self.parent().style().pixelMetric(pm, None, self.parent())
-        return -1
-
-    def horizontalSpacing(self):
-        return self._hspace if self._hspace >= 0 else self._smart_spacing(QStyle.PM_LayoutHorizontalSpacing)
-
-    def verticalSpacing(self):
-        return self._vspace if self._vspace >= 0 else self._smart_spacing(QStyle.PM_LayoutVerticalSpacing)
-
-    def _do_layout(self, rect, test_only):
-        l,t,r,b = self.getContentsMargins()
-        effective = rect.adjusted(+l, +t, -r, -b)
-        x, y = effective.x(), effective.y()
-        line_h = 0
-        hspace, vspace = self.horizontalSpacing(), self.verticalSpacing()
-
-        for item in self._items:
-            w, h = item.sizeHint().width(), item.sizeHint().height()
-            if w <= 0: continue
-            nxt = x + w + hspace
-            if nxt - hspace > effective.right() and line_h > 0:
-                x = effective.x()
-                y = y + line_h + vspace
-                nxt = x + w + hspace
-                line_h = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
-            x = nxt
-            line_h = max(line_h, h)
-
-        return (y + line_h - rect.y()) + b
+# === Helpers centralizados (sin cambiar lógica) ===
+from ui.pages.common import (
+    role_to_label, load_artist_colors, fallback_color_for, round_pixmap,
+    FlowLayout, NoStatusTipMenu
+)
 
 
 # ========================= Helpers de presentación =========================
-
-def _role_text(role: str) -> str:
-    return {"admin": "Admin", "assistant": "Asistente", "artist": "Tatuador"}.get(role, role)
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 def _avatar_dir() -> Path:
     p = _project_root() / "assets" / "avatars"
-    p.mkdir(parents=True, exist_ok=True); return p
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 def _avatar_path(uid: int) -> Path:
     return _avatar_dir() / f"{uid}.png"
-
-def _round_pixmap(pm: QPixmap, size: int) -> QPixmap:
-    if pm.isNull():
-        out = QPixmap(size, size); out.fill(Qt.transparent); return out
-    pm = pm.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-    out = QPixmap(size, size); out.fill(Qt.transparent)
-    p = QPainter(out); p.setRenderHint(QPainter.Antialiasing)
-    path = QPainterPath(); path.addEllipse(0, 0, size, size)
-    p.setClipPath(path); p.drawPixmap(0, 0, pm); p.end()
-    return out
-
-_ARTIST_PALETTE = ["#7C3AED", "#0EA5E9", "#10B981", "#F59E0B", "#EF4444",
-                   "#A855F7", "#06B6D4", "#84CC16", "#EAB308", "#F97316"]
-
-def _color_store_path() -> Path:
-    p = _project_root() / "assets"; p.mkdir(parents=True, exist_ok=True)
-    return p / "artist_colors.json"
-
-def _load_color_overrides() -> Dict[str, str]:
-    p = _color_store_path()
-    if not p.exists(): return {}
-    try: return json.loads(p.read_text(encoding="utf-8"))
-    except Exception: return {}
-
-def _artist_color_hex(artist_id: Optional[int]) -> str:
-    if not artist_id: return "#9CA3AF"
-    ov = _load_color_overrides(); key = str(int(artist_id))
-    if key in ov: return ov[key]
-    idx = int(artist_id) % len(_ARTIST_PALETTE)
-    return _ARTIST_PALETTE[idx]
 
 def _placeholder_avatar(size: int, nombre: str) -> QPixmap:
     initials = "".join([p[0].upper() for p in (nombre or "").split()[:2]]) or "?"
@@ -135,6 +47,24 @@ def _placeholder_avatar(size: int, nombre: str) -> QPixmap:
     p.setBrush(QColor("#d1d5db")); p.setPen(Qt.NoPen); p.drawEllipse(0, 0, size, size)
     p.setPen(QColor("#111")); p.drawText(pm.rect(), Qt.AlignCenter, initials); p.end()
     return pm
+
+def _artist_color_hex(artist_id: Optional[int]) -> str:
+    """
+    Usa overrides de assets/artist_colors.json (common.load_artist_colors)
+    y si no existe color definido, aplica un fallback estable por índice.
+    """
+    if not artist_id:
+        return "#9CA3AF"
+    try:
+        ov = load_artist_colors()
+        key = str(int(artist_id)).lower()
+        if key in ov and ov[key]:
+            return ov[key]
+    except Exception:
+        pass
+    # 10 colores base (mismo criterio que en otras páginas)
+    idx = int(artist_id) % 10
+    return fallback_color_for(idx)
 
 
 # -------------------------- Card interactiva --------------------------
@@ -178,7 +108,7 @@ class StaffCard(QFrame):
         avatar.setStyleSheet("background:transparent;")
         ap = _avatar_path(int(data["id"]))
         if ap.exists():
-            pm = _round_pixmap(QPixmap(str(ap)), AV_SIZE)
+            pm = round_pixmap(QPixmap(str(ap)), AV_SIZE)  # ← common.round_pixmap
         else:
             pm = _placeholder_avatar(AV_SIZE, data["nombre"] or data["username"])
         avatar.setPixmap(pm)
@@ -200,7 +130,7 @@ class StaffCard(QFrame):
 
         # Chips
         chips = QHBoxLayout(); chips.setSpacing(8)
-        chip_role = QLabel(_role_text(data["role_raw"]))
+        chip_role = QLabel(role_to_label(data["role_raw"]))  # ← common.role_to_label
         chip_state = QLabel("Activo" if data["is_active"] else "Inactivo")
         chip_role.setStyleSheet(f"background:transparent; color:{artist_hex}; border:1px solid {artist_hex}; padding:2px 8px; border-radius:8px;")
         if data["is_active"]:
@@ -236,7 +166,7 @@ class StaffCard(QFrame):
         super().mouseReleaseEvent(e)
 
     def contextMenuEvent(self, e):
-        m = QMenu(self)
+        m = NoStatusTipMenu(self)  # ← evita limpiar el status bar
         act = m.addAction("Ver perfil")
         chosen = m.exec_(e.globalPos())
         if chosen == act:
@@ -313,7 +243,6 @@ class StaffPage(QWidget):
         self.cbo_state.currentTextChanged.connect(self._on_filter_change)
         self.cbo_order.currentTextChanged.connect(self._on_order_change)
 
-
         f.addWidget(lbl_rol); f.addWidget(self.cbo_role)
         f.addWidget(lbl_est); f.addWidget(self.cbo_state)
         f.addWidget(lbl_ord); f.addWidget(self.cbo_order)
@@ -322,7 +251,7 @@ class StaffPage(QWidget):
         # ----------------- Zona de cards -----------------
         self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setFrameShape(QFrame.NoFrame)
         self.host = QWidget()
-        self.flow = FlowLayout(self.host, margin=0, hspacing=16, vspacing=16)
+        self.flow = FlowLayout(self.host, margin=0, spacing=16)  # ← common.FlowLayout
         self.host.setLayout(self.flow)
         self.scroll.setWidget(self.host)
         root.addWidget(self.scroll, stretch=1)
@@ -406,13 +335,13 @@ class StaffPage(QWidget):
                 if not (
                     txt in s["nombre"].lower()
                     or txt in s["username"].lower()
-                    or txt in _role_text(s["role_raw"]).lower()
+                    or txt in role_to_label(s["role_raw"]).lower()  # ← common.role_to_label
                     or (s.get("artist_name") and txt in s["artist_name"].lower())
                     or (s.get("email") and txt in s["email"].lower())
                     or (s.get("instagram") and txt in s["instagram"].lower())
                 ):
                     return False
-            if self.cbo_role.currentText() != "Todos" and _role_text(s["role_raw"]) != self.cbo_role.currentText():
+            if self.cbo_role.currentText() != "Todos" and role_to_label(s["role_raw"]) != self.cbo_role.currentText():
                 return False
             if self.cbo_state.currentText() != "Todos":
                 if self.cbo_state.currentText() == "Activo" and not s["is_active"]:
@@ -425,7 +354,7 @@ class StaffPage(QWidget):
         if self.cbo_order.currentText() == "A–Z":
             rows.sort(key=lambda s: s["nombre"].lower())
         else:
-            rows.sort(key=lambda s: (_role_text(s["role_raw"]), s["nombre"].lower()))
+            rows.sort(key=lambda s: (role_to_label(s["role_raw"]), s["nombre"].lower()))
         return rows
 
     def _refresh(self):
@@ -433,7 +362,8 @@ class StaffPage(QWidget):
         while self.flow.count():
             it = self.flow.takeAt(0)
             w = it.widget()
-            if w: w.deleteLater()
+            if w:
+                w.deleteLater()
 
         self._cards.clear()
 
@@ -451,7 +381,7 @@ class StaffPage(QWidget):
     def _update_card_widths(self):
         if not self._cards:
             return
-        spacing = self.flow.horizontalSpacing() or 16
+        spacing = self.flow.horizontalSpacing() if hasattr(self.flow, "horizontalSpacing") else 16
         cols = 3
         avail = self.scroll.viewport().width()
         # margen lateral del layout raíz: 24 a cada lado; el FlowLayout tiene margin 0.
@@ -464,11 +394,13 @@ class StaffPage(QWidget):
 
         # Forzar relayout
         self.host.updateGeometry()
-        self.flow.invalidate()
+        if hasattr(self.flow, "invalidate"):
+            self.flow.invalidate()
 
     # ----------------------- eventos -----------------------
     def _on_search(self, t: str):
-        self.search_text = t; self._refresh()
+        self.search_text = t
+        self._refresh()
 
     def _on_filter_change(self, _):
         self._refresh()

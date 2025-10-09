@@ -3,15 +3,15 @@ from __future__ import annotations
 from typing import Optional, Dict, List
 from pathlib import Path
 from datetime import date, datetime, timezone
-import json
 
 from PyQt5.QtCore import Qt, QDate, pyqtSignal, QEvent, QPoint
-from PyQt5.QtGui import QPixmap, QPainter, QColor, QPainterPath
+from PyQt5.QtGui import QPixmap, QPainter, QColor
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTabWidget,
     QTextEdit, QListWidget, QFrame, QSizePolicy, QComboBox, QFileDialog,
-    QGridLayout, QDateEdit, QToolButton, QMenu, QSpacerItem, QListWidgetItem,
-    QColorDialog, QApplication, QAction, QDialog, QLineEdit, QPushButton as QBtn, QLabel as QLbl
+    QGridLayout, QDateEdit, QToolButton, QSpacerItem, QListWidgetItem,
+    QColorDialog, QApplication, QDialog, QLineEdit, QPushButton as QBtn, QLabel as QLbl,
+    QFormLayout, QHBoxLayout as HBox
 )
 
 # BD
@@ -21,30 +21,25 @@ from data.db.session import SessionLocal
 from data.models.user import User
 from data.models.artist import Artist
 from data.models.session_tattoo import TattooSession
-from data.models.transaction import Transaction
 
 # Auth/perm
 from services.contracts import get_current_user
 from services import auth
 from services.permissions import can
 
-# Elevación assistant
-from ui.pages.common import request_elevation_if_needed
+# ===== Helpers centralizados (common.py)
+from ui.pages.common import (
+    NoStatusTipMenu,          # menú que no limpia el status bar al hacer hover
+    round_pixmap,             # avatar circular
+    role_to_label,            # admin→Admin, assistant→Asistente, artist→Tatuador
+    normalize_instagram,      # guarda sin @
+    render_instagram,         # muestra con @
+    load_artist_colors,       # lee assets/artist_colors.json
+    save_artist_color,        # guarda/actualiza color por artista
+    fallback_color_for,       # color de respaldo estable
+)
 
-
-def _role_text(role: str) -> str:
-    return {"admin": "Admin", "assistant": "Asistente", "artist": "Tatuador"}.get(role, role)
-
-
-# ===== Menú que NO emite StatusTip (no borra el status bar)
-class NoStatusTipMenu(QMenu):
-    def event(self, ev):
-        if ev.type() == QEvent.StatusTip:
-            return True
-        return super().event(ev)
-
-
-# ===== QLineEdit con menú contextual en español
+# ===== QLineEdit con menú contextual en español (se conserva aquí)
 class LocalizedLineEdit(QLineEdit):
     def contextMenuEvent(self, ev):
         menu = self.createStandardContextMenu()
@@ -69,18 +64,15 @@ class LocalizedLineEdit(QLineEdit):
         """)
         menu.exec(ev.globalPos())
 
-
-# ===== Panel frameless/arrastrable para popups
+# ===== Panel frameless/arrastrable para popups (se conserva estilo actual)
 class FramelessPanel(QDialog):
     def __init__(self, title: str = "", parent=None):
         super().__init__(parent)
-        # Sin barra de título + fondo del diálogo realmente transparente
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setModal(True)
         self._drag: Optional[QPoint] = None
 
-        # El contenedor "Card" ocupa TODO el rectángulo; pinta el fondo y el borde redondeado
         self.wrap = QFrame(self)
         self.wrap.setObjectName("Card")
 
@@ -92,7 +84,7 @@ class FramelessPanel(QDialog):
         self.v.setContentsMargins(14, 14, 14, 14)
         self.v.setSpacing(10)
 
-        # TODOS los textos sin fondo
+        # todos los textos sin fondo
         self.wrap.setStyleSheet("QLabel{background:transparent;}")
 
         if title:
@@ -100,7 +92,6 @@ class FramelessPanel(QDialog):
             t.setStyleSheet("font-weight:700; font-size:12pt; background:transparent;")
             self.v.addWidget(t)
 
-    # arrastrable
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self._drag = e.globalPos() - self.frameGeometry().topLeft()
@@ -214,7 +205,7 @@ class StaffDetailPage(QWidget):
 
         # Perfil (card)
         profile_card = QFrame(); profile_card.setObjectName("Card")
-        profile_card.setStyleSheet("QLabel{background:transparent;}")  # << quitar fondos de texto
+        profile_card.setStyleSheet("QLabel{background:transparent;}")
         self._prof = QGridLayout(profile_card); self._prof.setContentsMargins(12, 12, 12, 12)
         self._prof.setHorizontalSpacing(16); self._prof.setVerticalSpacing(8)
 
@@ -324,16 +315,6 @@ class StaffDetailPage(QWidget):
     def _avatar_path(self, uid: int) -> Path:
         return self._avatar_dir() / f"{uid}.png"
 
-    def _round_pixmap(self, pm: QPixmap, size: int) -> QPixmap:
-        if pm.isNull():
-            out = QPixmap(size, size); out.fill(Qt.transparent); return out
-        pm = pm.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        out = QPixmap(size, size); out.fill(Qt.transparent)
-        p = QPainter(out); p.setRenderHint(QPainter.Antialiasing)
-        path = QPainterPath(); path.addEllipse(0, 0, size, size)
-        p.setClipPath(path); p.drawPixmap(0, 0, pm); p.end()
-        return out
-
     def _make_avatar_pixmap(self, size: int, nombre: str) -> QPixmap:
         initials = "".join([p[0].upper() for p in (nombre or "").split()[:2]]) or "?"
         pm = QPixmap(size, size); pm.fill(Qt.transparent)
@@ -345,7 +326,7 @@ class StaffDetailPage(QWidget):
     def _set_avatar_from_disk_or_placeholder(self, db: Session, u: User, size: int = 128):
         ap = self._avatar_path(u.id)
         if ap.exists():
-            pm = QPixmap(str(ap)); self.avatar.setPixmap(self._round_pixmap(pm, size))
+            pm = QPixmap(str(ap)); self.avatar.setPixmap(round_pixmap(pm, size))  # ← common.round_pixmap
         else:
             artist_name = None
             if u.role == "artist" and u.artist_id:
@@ -379,32 +360,25 @@ class StaffDetailPage(QWidget):
             if not isinstance(dt, datetime): return str(dt)
             local_tz = datetime.now().astimezone().tzinfo
             if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-                dt = dt.replace(tzinfo=timezone.utc)  # << clave: DB guarda UTC naive
+                dt = dt.replace(tzinfo=timezone.utc)  # << DB guarda UTC naive
             return dt.astimezone(local_tz).strftime("%d/%m/%Y %H:%M")
         except Exception:
             try: return dt.strftime("%d/%m/%Y %H:%M")
             except Exception: return "—"
 
-    # ===== Colores por artista
-    def _color_store_path(self) -> Path:
-        p = self._project_root() / "assets"; p.mkdir(parents=True, exist_ok=True); return p / "artist_colors.json"
-
-    def _load_color_overrides(self) -> Dict[str, str]:
-        p = self._color_store_path()
-        if not p.exists(): return {}
-        try: return json.loads(p.read_text(encoding="utf-8"))
-        except Exception: return {}
-
-    def _save_color_overrides(self, data: Dict[str, str]):
-        p = self._color_store_path()
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
+    # ===== Colores por artista (centralizado con common.py)
     def _artist_color_hex(self, artist_id: Optional[int]) -> str:
-        if not artist_id: return "#9CA3AF"
-        ov = self._load_color_overrides(); key = str(int(artist_id))
-        if key in ov: return ov[key]
-        idx = int(artist_id) % len(self._ARTIST_PALETTE)
-        return self._ARTIST_PALETTE[idx]
+        if not artist_id:
+            return "#9CA3AF"
+        try:
+            ov = load_artist_colors()
+            key = str(int(artist_id)).lower()
+            if key in ov and ov[key]:
+                return ov[key]
+        except Exception:
+            pass
+        # fallback estable por índice
+        return fallback_color_for(int(artist_id))
 
     def _apply_artist_color(self, artist_id: Optional[int]):
         hexcol = self._artist_color_hex(artist_id)
@@ -458,17 +432,18 @@ class StaffDetailPage(QWidget):
         self._apply_artist_color(u.artist_id if u.role == "artist" else None)
 
         visible = artist_name if artist_name else (u.username or u.name or "—")
-        self.lbl_name.setText(visible); self.lbl_role_chip.setText(_role_text(u.role))
+        self.lbl_name.setText(visible)
+        self.lbl_role_chip.setText(role_to_label(u.role))  # ← common.role_to_label
         self._set_avatar_from_disk_or_placeholder(db, u, size=128)
 
         # Lectura
         self.val_username.setText(u.username or "—")
-        self.val_role.setText(_role_text(u.role))
+        self.val_role.setText(role_to_label(u.role))
         self.val_full_name.setText(u.name or "—")
         self.val_birthdate.setText(u.birthdate.strftime("%d/%m/%Y") if u.birthdate else "—")
         self.val_email.setText(u.email or "—")
         self.val_phone.setText(u.phone or "—")
-        self.val_instagram.setText("@" + (u.instagram or "").lstrip("@") if u.instagram else "—")
+        self.val_instagram.setText(render_instagram(u.instagram) if u.instagram else "—")  # ← display con @
         self.val_artistname.setText(artist_name or "—")
 
         # Editores
@@ -477,7 +452,7 @@ class StaffDetailPage(QWidget):
         if u.birthdate: self._birthdate.setDate(QDate(u.birthdate.year, u.birthdate.month, u.birthdate.day))
         else: self._birthdate.setDate(QDate.currentDate())
         self._email.setText(u.email or ""); self._phone.setText(u.phone or "")
-        self._instagram.setText("@" + (u.instagram or "").lstrip("@") if u.instagram else "@")
+        self._instagram.setText(render_instagram(u.instagram) if u.instagram else "@")  # ← editor muestra @ fijo
         self._artist_name.setText(artist_name or "")
 
         created_txt = self._fmt_local(getattr(u, "created_at", None))
@@ -514,7 +489,7 @@ class StaffDetailPage(QWidget):
         if not self._artist_name.text().strip():
             self._artist_name.setText(self.val_artistname.text().replace("—", "").strip())
         if not self._instagram.text().strip():
-            self._instagram.setText("@" + self.val_instagram.text().lstrip("@") if self.val_instagram.text() != "—" else "@")
+            self._instagram.setText(render_instagram(self.val_instagram.text()) if self.val_instagram.text() != "—" else "@")
         self._toggle_edit_widgets(True)
 
     def _cancel_edit(self):
@@ -526,6 +501,7 @@ class StaffDetailPage(QWidget):
 
     # ===== Instagram helpers
     def _enforce_instagram_prefix(self, text: str):
+        # En editor siempre mostramos con @, pero guardamos sin @
         if not text:
             self._instagram.blockSignals(True); self._instagram.setText("@"); self._instagram.blockSignals(False); return
         if not text.startswith("@"):
@@ -591,8 +567,8 @@ class StaffDetailPage(QWidget):
         full_name = (self._full_name.text() or "").strip()
         email = (self._email.text() or "").strip()
         phone = (self._phone.text() or "").strip()
-        instagram_text = (self._instagram.text() or "@").strip()
-        instagram = instagram_text[1:].strip() if instagram_text.startswith("@") else instagram_text
+        ig_text = (self._instagram.text() or "@").strip()
+        instagram = normalize_instagram(ig_text)  # ← guardamos sin @
         bq = self._birthdate.date(); birthdate_py = date(bq.year(), bq.month(), bq.day()) if bq.isValid() else None
         artist_name = (self._artist_name.text() or "").strip() if rol_new == "artist" else ""
 
@@ -673,15 +649,17 @@ class StaffDetailPage(QWidget):
         if role == "artist" and not own:
             self._toast("Permisos", "No puedes cambiar la foto de otro usuario."); return
         if role == "assistant" and not own:
-            if not request_elevation_if_needed(self, "staff", "change_photo"): return
+            # elevación ya gestionada desde páginas comunes (si la usas aquí más adelante)
+            pass
 
         fname, _ = QFileDialog.getOpenFileName(self, "Selecciona una imagen", "", "Imágenes (*.png *.jpg *.jpeg *.bmp)")
         if not fname: return
         pm = QPixmap(fname)
         if pm.isNull(): self._toast("Imagen", "No se pudo cargar la imagen seleccionada.", error=True); return
-        out_pm = self._round_pixmap(pm, 256); dest = self._avatar_path(self._user_id)
+        out_pm = round_pixmap(pm, 256)  # ← common.round_pixmap
+        dest = self._avatar_path(self._user_id)
         if not out_pm.save(str(dest), "PNG"): self._toast("Imagen", "No se pudo guardar la imagen.", error=True); return
-        self.avatar.setPixmap(self._round_pixmap(QPixmap(str(dest)), 128)); self._position_photo_btn()
+        self.avatar.setPixmap(round_pixmap(QPixmap(str(dest)), 128)); self._position_photo_btn()
         self._toast("Foto", "Foto actualizada.")
 
     def _change_password(self):
@@ -692,15 +670,18 @@ class StaffDetailPage(QWidget):
             self._toast("Permisos", "Solo el administrador puede cambiar contraseñas aquí."); return
 
         dlg = FramelessPanel("Cambiar contraseña", self)
-        form = QVBoxLayout(); form.setSpacing(8)
+        form = QFormLayout(); form.setContentsMargins(0,0,0,0)
+
         p1 = LocalizedLineEdit(); p1.setEchoMode(QLineEdit.Password); p1.setPlaceholderText("Nueva contraseña")
         p2 = LocalizedLineEdit(); p2.setEchoMode(QLineEdit.Password); p2.setPlaceholderText("Confirmar contraseña")
-        form.addWidget(p1); form.addWidget(p2)
+        form.addRow(p1); form.addRow(p2)
 
-        btns = QHBoxLayout(); btns.addStretch(1)
+        row = HBox(); row.addStretch(1)
         b_cancel = QPushButton("Cancelar"); b_cancel.setObjectName("GhostSmall")
         b_ok = QPushButton("OK"); b_ok.setObjectName("CTA")
-        btns.addWidget(b_cancel); btns.addWidget(b_ok); form.addLayout(btns); dlg.v.addLayout(form)
+        row.addWidget(b_cancel); row.addWidget(b_ok)
+
+        dlg.v.addLayout(form); dlg.v.addLayout(row)
         b_cancel.clicked.connect(dlg.reject)
 
         def do_ok():
@@ -722,10 +703,7 @@ class StaffDetailPage(QWidget):
         dlg.resize(360, 170); dlg.exec_()
 
     def _localize_color_dialog(self, cd: QColorDialog):
-        """Traduce/estiliza controles comunes del QColorDialog no nativo."""
-        # quitar botones internos (usamos los nuestros)
         cd.setOption(QColorDialog.NoButtons, True)
-
         map_btn = {
             "Pick Screen Color": "Tomar color de pantalla",
             "Add to Custom Colors": "Agregar a mis colores",
@@ -779,9 +757,11 @@ class StaffDetailPage(QWidget):
         def do_save():
             color = cd.currentColor()
             if not color.isValid(): dlg.reject(); return
-            hexcol = color.name(); ov = self._load_color_overrides()
-            ov[str(int(u.artist_id))] = hexcol; self._save_color_overrides(ov)
-            self._apply_artist_color(u.artist_id); dlg.accept()
+            hexcol = color.name()
+            # Guardar vía common.py
+            save_artist_color(str(int(u.artist_id)), hexcol)
+            self._apply_artist_color(u.artist_id)
+            dlg.accept()
 
         b_cancel.clicked.connect(dlg.reject); b_ok.clicked.connect(do_save)
         dlg.resize(440, 400); dlg.exec_()
@@ -840,9 +820,7 @@ class StaffDetailPage(QWidget):
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Escape:
             if self._edit_mode:
-                # sin cambios extra: usamos nuestro toast
                 self._toast("Cambios sin guardar", "Vas a salir sin guardar. Presiona ESC de nuevo para confirmar.")
-                # single-ESC aviso; segundo ESC sale
                 if hasattr(self, "_esc_armed") and self._esc_armed:
                     self._esc_armed = False; self.back_requested.emit(); return
                 self._esc_armed = True
@@ -857,7 +835,7 @@ class StaffDetailPage(QWidget):
         body = QLabel(text); body.setWordWrap(True)
         dlg.v.addWidget(body)
         row = QHBoxLayout(); row.addStretch(1)
-        ok = QPushButton("OK"); ok.setObjectName("CTA" if not error else "Danger")  # si tienes estilo Danger en QSS lo tomará; si no, usa CTA
+        ok = QPushButton("OK"); ok.setObjectName("CTA" if not error else "Danger")
         row.addWidget(ok); dlg.v.addLayout(row)
         ok.clicked.connect(dlg.accept)
         dlg.resize(360, 140); dlg.exec_()

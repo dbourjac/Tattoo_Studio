@@ -3,12 +3,10 @@ from __future__ import annotations
 # ============================================================
 # clients.py — Lista de clientes (conexión real a BD + RBAC)
 #
-# Cambios en esta entrega:
-# - Columna "Etiquetas" eliminada → 5 columnas: Cliente, Contacto, Artista, Próxima cita, Estado.
-# - Placeholder del buscador actualizado: incluye Instagram.
-# - Paginación visual eliminada: se implementa "lista infinita" (lazy load) en scroll.
-# - Acciones rápidas con menú contextual: Abrir ficha, Copiar teléfono, Copiar email, Abrir Instagram.
-# - Contacto: preferimos Tel + @instagram; si falta IG, se usa email como fallback.
+# Optimización:
+# - Menú contextual con NoStatusTipMenu (no limpia el status bar).
+# - Instagram con render_instagram (muestra @ de forma consistente).
+# - Sin cambios de lógica, columnas ni comportamiento.
 # ============================================================
 
 from typing import List, Dict, Any, Optional
@@ -18,7 +16,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QPoint
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QFrame, QMessageBox, QMenu, QApplication
+    QFrame, QMessageBox, QApplication
 )
 
 # DB & modelos
@@ -30,8 +28,8 @@ from data.models.client import Client
 from data.models.artist import Artist
 from data.models.session_tattoo import TattooSession
 
-# RBAC helpers (UI)
-from ui.pages.common import ensure_permission
+# Helpers centralizados
+from ui.pages.common import ensure_permission, NoStatusTipMenu, render_instagram
 from services.contracts import get_current_user
 
 
@@ -133,9 +131,10 @@ class ClientsPage(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+        self.table.cellClicked.connect(self._on_single_click)
         self.table.cellDoubleClicked.connect(self._on_double_click)
 
-        # Menú contextual (acciones rápidas)
+        # Menú contextual (acciones rápidas) — NoStatusTipMenu evita limpiar status bar
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._open_context_menu)
 
@@ -211,7 +210,7 @@ class ClientsPage(QWidget):
                     if primary:
                         parts.append(str(primary))
                     if instagram:
-                        parts.append("@" + str(instagram))
+                        parts.append(render_instagram(str(instagram)))  # ← muestra siempre con @
                     else:
                         if email and email != primary:
                             parts.append(str(email))
@@ -303,6 +302,10 @@ class ClientsPage(QWidget):
         self.order_by = text
         self._apply_and_reset_render()
 
+    def _on_single_click(self, row: int, col: int):
+        # (Mantengo simple: solo selecciona fila. Navegación con doble clic o menú contextual)
+        pass
+
     def _on_double_click(self, row: int, col: int):
         item = self.table.item(row, 0)
         if not item:
@@ -327,7 +330,7 @@ class ClientsPage(QWidget):
         if not data:
             return
 
-        m = QMenu(self)
+        m = NoStatusTipMenu(self)  # ← evita que se borre el status bar al pasar el mouse
         act_open = m.addAction("Abrir ficha")
         act_copy_phone = m.addAction("Copiar teléfono")
         act_copy_mail = m.addAction("Copiar correo")
@@ -349,7 +352,7 @@ class ClientsPage(QWidget):
         elif act_open_ig and chosen == act_open_ig:
             # abrir perfil IG en navegador
             import webbrowser
-            handle = str(ig).lstrip("@")
+            handle = str(ig or "").lstrip("@")
             webbrowser.open(f"https://instagram.com/{handle}")
 
     # ---------- Acciones Toolbar ----------
