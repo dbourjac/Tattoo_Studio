@@ -12,3 +12,4 @@ from .inventory_items import InventoryItemsPage
 from .inventory_item_detail import InventoryItemDetailPage
 from .inventory_movements import InventoryMovementsPage
 from .agenda import AgendaPage
+from .portfolios import PortfoliosPage

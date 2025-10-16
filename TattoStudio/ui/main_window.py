@@ -7,13 +7,16 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton,
     QFrame, QStatusBar, QStackedWidget, QSizePolicy, QDialog
 )
-from ui.pages.new_item import NewItemPage
+
 from ui.widgets.user_panel import PanelUsuario
 from ui.styles.themes import apply_theme
+from ui.pages.new_item import NewItemPage
+from ui.pages.common import FramelessPopup
 
 # Login / sesión actual
 from services.contracts import set_current_user, get_current_user
 from ui.login import LoginDialog
+from ui.pages.portfolios import PortfoliosPage
 
 # Páginas exportadas por ui/pages/__init__.py
 from ui.pages import (
@@ -190,10 +193,16 @@ class MainWindow(QMainWindow):
 
         # ----- Wiring desde portada (CTAs) -----
         self.studio_page.ir_nueva_cita.connect(lambda: self._ir(self.idx_agenda))
-        # Abrir "Nuevo cliente" como POPUP:
         self.studio_page.ir_nuevo_cliente.connect(self._abrir_nuevo_cliente_popup)
         self.studio_page.ir_caja.connect(self._open_cash_dialog)
-        self.studio_page.ir_portafolios.connect(lambda: self._ir(self._ensure_portfolios_page()))
+
+        # Portafolios (página real)
+        self.portfolios_page = PortfoliosPage()
+        self.idx_portafolios = self.stack.addWidget(self.portfolios_page)
+
+        # Si tu portada emite esta señal, enlázala (si no existe, no revienta)
+        if hasattr(self.studio_page, "ir_portafolios"):
+            self.studio_page.ir_portafolios.connect(lambda: self._ir(self.idx_portafolios))
 
         # Clients wiring
         self.clients_page.crear_cliente.connect(self._abrir_nuevo_cliente_popup)
@@ -215,7 +224,7 @@ class MainWindow(QMainWindow):
         # =========================
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage("Ver. 0.1.8 | Último respaldo —")
+        status.showMessage("Ver. 0.1.9 | Último respaldo —")
 
         # =========================
         #  Layout raíz
@@ -295,12 +304,6 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "idx_cash"):
             self.idx_cash = self.stack.addWidget(make_simple_page("Caja rápida"))
         return self.idx_cash
-
-    def _ensure_portfolios_page(self) -> int:
-        """Crea (una vez) la página 'Portafolios' (placeholder) y devuelve su índice."""
-        if not hasattr(self, "idx_portafolios"):
-            self.idx_portafolios = self.stack.addWidget(make_simple_page("Portafolios"))
-        return self.idx_portafolios
 
     # ---------- RBAC ----------
     def _allowed_indices_for_role(self):
@@ -594,30 +597,69 @@ class MainWindow(QMainWindow):
             self.user_panel.hide()
             self.btn_user.setChecked(False)
         super().mousePressEvent(event)
-
-
-    def _on_item_creado(self, sku):
-      print(f"✅ Nuevo ítem creado con SKU: {sku}")
-    # Aquí podrías recargar una tabla, refrescar datos, etc.
-   
-      self.inventory_items._seed_mock();
-      self.inventory_items._refresh()
+    
+    def _on_item_creado(self, sku: str):
+    # Refrescar la lista de Inventario tras crear
+        try:
+            if hasattr(self.inventory_items, "reload_from_db_and_refresh"):
+                self.inventory_items.reload_from_db_and_refresh()
+            elif hasattr(self.inventory_items, "refresh"):
+                self.inventory_items.refresh()
+            elif hasattr(self.inventory_items, "_refresh"):
+                self.inventory_items._refresh()
+        except Exception:
+            pass
+        # Volvemos a la lista de items
+        self._ir(self.idx_inv_items)
 
     def _abrir_popup_nuevo_item(self):
-    # Crear diálogo modal
-      dialog = QDialog(self)
-      dialog.setWindowTitle("Nuevo item")
-      dialog.setModal(True)  # bloquea la ventana principal
+        # Popup frameless, translúcido y arrastrable
+        dlg = FramelessPopup(self)
+        dlg.setObjectName("NewItemDlg")
+        dlg.setModal(True)
+        dlg.setAttribute(Qt.WA_TranslucentBackground, True)   # ← SIN cuadro exterior
+        dlg.resize(860, 720)
 
-    # Agregar el formulario dentro del diálogo
-      layout = QVBoxLayout(dialog)
-      form = NewItemPage()
-      layout.addWidget(form)
-      form.item_creado.connect(self._on_item_creado)
-    # Cuando se cierre el formulario (por el botón "Cancelar" o al guardar)
-    # cerramos también el QDialog
-      form.btn_guardar.clicked.connect(dialog.accept)
-      form.btn_cancelar.clicked.connect(dialog.reject)
-     
-    # Mostrar el popup
-      dialog.exec_()
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(0, 0, 0, 0)  # sin margen para que no se vea un fondo cuadrado
+        outer.setSpacing(0)
+
+        panel = QFrame(dlg)
+        panel.setObjectName("PopupPanel")
+        outer.addWidget(panel)
+
+        panel_lay = QVBoxLayout(panel)
+        panel_lay.setContentsMargins(24, 24, 24, 24)
+        panel_lay.setSpacing(0)
+
+        form = NewItemPage(panel)
+        panel_lay.addWidget(form)
+
+        # Estilos: dialogo transparente, panel redondeado
+        dlg.setStyleSheet("""
+        #NewItemDlg { background: transparent; }
+        #PopupPanel {
+            background: #2A2F34;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 16px;
+        }
+        """)
+        # Si usas sombra:
+        from PyQt5.QtWidgets import QGraphicsDropShadowEffect
+        from PyQt5.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(dlg)
+        shadow.setBlurRadius(32)
+        shadow.setXOffset(0)
+        shadow.setYOffset(8)
+        shadow.setColor(QColor(0, 0, 0, 120))
+        panel.setGraphicsEffect(shadow)
+
+        # Señales (igual que antes)
+        try: form.item_creado.connect(self._on_item_creado)
+        except: pass
+        try: form.btn_guardar.clicked.connect(dlg.accept)
+        except: pass
+        try: form.btn_cancelar.clicked.connect(dlg.reject)
+        except: pass
+
+        dlg.exec_()

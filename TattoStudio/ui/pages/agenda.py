@@ -31,14 +31,13 @@ from data.db.session import SessionLocal
 from data.models.client import Client
 from data.models.artist import Artist as DBArtist
 
-# Permisos centralizados (elevación incluida)
-from ui.pages.common import ensure_permission
+# Permisos centralizados (elevación incluida) + menús con hover
+from ui.pages.common import ensure_permission, make_styled_menu
 
 # Helpers compartidos (optimización: sin duplicar lógica de colores/menús)
 from ui.pages.common import (
-    artist_colors_path, load_artist_colors, fallback_color_for, NoStatusTipMenu
+    artist_colors_path, load_artist_colors, fallback_color_for, NoStatusTipMenu, ClickAwayDialog
 )
-
 
 # ==============================
 #   MODELOS DE UI (DTOs)
@@ -233,24 +232,6 @@ class _FramelessDialog(QDialog):
                     return True
         return super().eventFilter(obj, ev)
 
-class _ClickAwayDialog(_FramelessDialog):
-    """
-    Igual que _FramelessDialog pero con comportamiento tipo 'popup':
-    se cierra automáticamente al perder foco o al hacer click fuera.
-    """
-    def __init__(self, title: str, parent=None):
-        super().__init__(title, parent, close_on_click_outside=False)
-        # Qt.Popup hace que se cierre al click fuera y al perder foco.
-        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
-
-    # Si por alguna razón pierde el foco, ciérralo (comportamiento de popup)
-    def focusOutEvent(self, e):
-        try:
-            self.reject()
-        except Exception:
-            pass
-        super().focusOutEvent(e)
-
 
 class NewApptDialog(_FramelessDialog):
     """Diálogo de nueva cita con autocompletado de clientes."""
@@ -274,14 +255,20 @@ class NewApptDialog(_FramelessDialog):
         self.cbo_artist = QComboBox()
         for a in artists:
             self.cbo_artist.addItem(a.name, a.id)
-        form.addRow("Artista:", self.cbo_artist)
+        self.cbo_artist.setCurrentIndex(-1)  # ninguna selección por defecto
+        form.addRow("Tatuador:", self.cbo_artist)
+
 
         # Cliente con combo editable + completer
-        self.cb_client = QComboBox(); self.cb_client.setEditable(True); self.cb_client.setInsertPolicy(QComboBox.NoInsert)
+        self.cb_client = QComboBox()
+        self.cb_client.setEditable(True)
+        self.cb_client.setInsertPolicy(QComboBox.NoInsert)
         for cid, cname in clients:
             self.cb_client.addItem(cname, cid)
         completer = QCompleter([n for _, n in clients], self.cb_client)
-        completer.setCaseSensitivity(Qt.CaseInsensitive); self.cb_client.setCompleter(completer)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.cb_client.setCompleter(completer)
+        self.cb_client.setCurrentIndex(-1)  # ninguna selección por defecto
         form.addRow("Cliente:", self.cb_client)
 
         self.ed_service = QPlainTextEdit(); self.ed_service.setPlaceholderText("Servicio / notas")
@@ -295,8 +282,9 @@ class NewApptDialog(_FramelessDialog):
 
         btns = QHBoxLayout()
         self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("cancelbtn")
-        self.btn_ok = QPushButton("OK"); self.btn_ok.setObjectName("okbtn")
-        self.btn_cancel.clicked.connect(self.reject); self.btn_ok.clicked.connect(self.accept)
+        self.btn_ok = QPushButton("Crear"); self.btn_ok.setObjectName("okbtn")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok.clicked.connect(self.accept)
         btns.addStretch(1); btns.addWidget(self.btn_cancel); btns.addWidget(self.btn_ok)
         self.body_l.addLayout(btns)
 
@@ -307,8 +295,14 @@ class NewApptDialog(_FramelessDialog):
         dur   = self.sp_dur.value()
         client_id = self.cb_client.currentData()
         client_name = self.cb_client.currentText().strip()
+        aid = self.cbo_artist.currentData()
+        artist_id = int(aid) if aid is not None else None
+
+        client_id = self.cb_client.currentData()
+        client_name = self.cb_client.currentText().strip()
+
         return {
-            "artist_id": int(self.cbo_artist.currentData()),
+            "artist_id": artist_id,
             "client_id": int(client_id) if client_id is not None else None,
             "client_name": client_name or None,
             "notes": (self.ed_service.toPlainText() or "").strip(),
@@ -316,7 +310,6 @@ class NewApptDialog(_FramelessDialog):
             "start": start,
             "end": start + timedelta(minutes=dur),
         }
-
 
 class EditApptDialog(_FramelessDialog):
     def __init__(self, parent, artists: List[Artist], clients: List[Tuple[int, str]], ap: Appt):
@@ -339,15 +332,40 @@ class EditApptDialog(_FramelessDialog):
         self.cbo_artist = QComboBox()
         for a in artists:
             self.cbo_artist.addItem(a.name, a.id)
-        self.cbo_artist.setCurrentIndex(max(0, self.cbo_artist.findData(ap.artist_id)))
-        form.addRow("Artista:", self.cbo_artist)
 
-        self.cb_client = QComboBox(); self.cb_client.setEditable(True); self.cb_client.setInsertPolicy(QComboBox.NoInsert)
+        # Guarda originales para fallback y preselecciona
+        self._orig_artist_id = ap.artist_id
+        idx = self.cbo_artist.findData(ap.artist_id)
+        if idx < 0:
+            try:
+                idx = self.cbo_artist.findData(int(ap.artist_id))
+            except Exception:
+                idx = -1
+        self.cbo_artist.setCurrentIndex(idx)
+
+        form.addRow("Tatuador:", self.cbo_artist)
+
+        self.cb_client = QComboBox()
+        self.cb_client.setEditable(True)
+        self.cb_client.setInsertPolicy(QComboBox.NoInsert)
         for cid, cname in clients:
             self.cb_client.addItem(cname, cid)
+
         completer = QCompleter([n for _, n in clients], self.cb_client)
-        completer.setCaseSensitivity(Qt.CaseInsensitive); self.cb_client.setCompleter(completer)
-        self.cb_client.setCurrentText(ap.client_name or "")
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.cb_client.setCompleter(completer)
+
+        # Guarda originales y preselecciona
+        self._orig_client_id = ap.client_id
+        self._orig_client_name = ap.client_name
+
+        idx_c = self.cb_client.findData(ap.client_id) if ap.client_id is not None else -1
+        if idx_c >= 0:
+            self.cb_client.setCurrentIndex(idx_c)
+        else:
+            # si no está en la lista, muestra el nombre como texto
+            self.cb_client.setCurrentText(ap.client_name or "")
+
         form.addRow("Cliente:", self.cb_client)
 
         self.ed_service = QPlainTextEdit(ap.service or ""); self.ed_service.setFixedHeight(80)
@@ -364,25 +382,35 @@ class EditApptDialog(_FramelessDialog):
         self.btn_ok = QPushButton("Guardar"); self.btn_ok.setObjectName("okbtn")
         self.btn_cancel.clicked.connect(self.reject); self.btn_ok.clicked.connect(self.accept)
         btns.addStretch(1); btns.addWidget(self.btn_cancel); btns.addWidget(self.btn_ok)
-        self.body_l.addLayout(btns)
+        self.body_l.addLayout(btns)  # <- Asegúrate que aquí diga 'self.' (no 'dlg.')
 
     def values(self) -> dict:
         date = self.dt_date.date()
         h, m = self.sp_hour.value(), self.sp_min.value()
         start = datetime(date.year(), date.month(), date.day(), h, m, 0)
         dur   = self.sp_dur.value()
-        client_id = self.cb_client.currentData()
-        client_name = self.cb_client.currentText().strip()
+
+        aid = self.cbo_artist.currentData()
+        if aid is None:
+            aid = self._orig_artist_id
+        artist_id = int(aid) if aid is not None else None
+
+        cid = self.cb_client.currentData()
+        if cid is None:
+            cid = self._orig_client_id
+        client_id = int(cid) if cid is not None else None
+
+        client_name = (self.cb_client.currentText() or "").strip() or self._orig_client_name or None
+
         return {
-            "artist_id": int(self.cbo_artist.currentData()),
-            "client_id": int(client_id) if client_id is not None else None,
-            "client_name": client_name or None,
+            "artist_id": artist_id,
+            "client_id": client_id,
+            "client_name": client_name,
             "notes": (self.ed_service.toPlainText() or "").strip(),
             "status": self.cbo_status.currentText(),
             "start": start,
             "end": start + timedelta(minutes=dur),
         }
-
 
 class PaymentDialog(_FramelessDialog):
     """
@@ -845,10 +873,17 @@ class AgendaPage(QWidget):
         if dlg.exec_() != QDialog.Accepted:
             return
         val = dlg.values()
+
+        # 1) Exigir tatuador
+        if val.get("artist_id") is None:
+            QMessageBox.warning(self, "Nueva cita", "Selecciona un tatuador.")
+            return
+
         owner_id = val["artist_id"]
         if not ensure_permission(self, "agenda", "create", owner_id=owner_id):
             return
 
+        # 2) Exigir cliente de la lista
         if val.get("client_id") is None:
             QMessageBox.warning(self, "Nueva cita", "Selecciona un cliente de la lista.")
             return
@@ -877,7 +912,7 @@ class AgendaPage(QWidget):
     # Detalle
     def _open_appt_detail(self, ap: Appt):
         # Popup que se cierra al click fuera
-        dlg = _ClickAwayDialog("Detalle de cita", self)
+        dlg = ClickAwayDialog("Detalle de cita", self)
 
         form = QFormLayout(); form.setContentsMargins(0,0,0,0)
         a = self._artist_by_id(ap.artist_id)
@@ -893,11 +928,15 @@ class AgendaPage(QWidget):
 
         # Botones
         btns = QHBoxLayout()
-        b_edit = QPushButton("Editar"); b_state = QPushButton("Cambiar estado"); b_repg = QPushButton("Reprogramar")
-        b_del = QPushButton("Eliminar"); b_close = QPushButton("Cerrar")
-        for b in (b_edit, b_state, b_repg, b_del, b_close):
+        b_edit = QPushButton("Editar")
+        b_state = QPushButton("Cambiar estado")
+        b_close = QPushButton("Cerrar")
+        for b in (b_edit, b_state, b_close):
             b.setObjectName("okbtn")
-        btns.addStretch(1); btns.addWidget(b_edit); btns.addWidget(b_state); btns.addWidget(b_repg); btns.addWidget(b_del); btns.addWidget(b_close)
+        btns.addStretch(1)
+        btns.addWidget(b_edit)
+        btns.addWidget(b_state)
+        btns.addWidget(b_close)
         dlg.body_l.addLayout(btns)
 
         # Acciones
@@ -906,7 +945,7 @@ class AgendaPage(QWidget):
             self._edit_appt(ap)
 
         def do_state():
-            m = NoStatusTipMenu(dlg)  # <-- evita limpiar el status bar
+            m = make_styled_menu(dlg)
             acts = {
                 "Activa": m.addAction("Activa"),
                 "En espera": m.addAction("En espera"),
@@ -914,34 +953,15 @@ class AgendaPage(QWidget):
                 "Cancelada": m.addAction("Cancelada"),
             }
             chosen = m.exec_(QCursor.pos())
-            if not chosen: return
+            if not chosen:
+                return
             for k, v in acts.items():
                 if v is chosen:
-                    self._set_status(ap, k); break
-
-        def do_repg():
-            dlg.close()
-            self._edit_appt(ap, focus_time=True)
-
-        def do_del():
-            owner_id = int(ap.artist_id)
-            if not ensure_permission(self, "agenda", "delete", owner_id=owner_id):
-                return
-            try:
-                if delete_session:
-                    delete_session(int(ap.id))
-                else:
-                    cancel_session(int(ap.id))
-                QMessageBox.information(self, "Cita", "Cita eliminada.")
-            except Exception as e:
-                QMessageBox.critical(self, "Agenda", f"No se pudo eliminar: {e}")
-            self._refresh_all()
-            dlg.close()
+                    self._set_status(ap, k)
+                    break
 
         b_edit.clicked.connect(do_edit)
         b_state.clicked.connect(do_state)
-        b_repg.clicked.connect(do_repg)
-        b_del.clicked.connect(do_del)
         b_close.clicked.connect(dlg.close)
 
         dlg.exec_()
@@ -991,7 +1011,7 @@ class AgendaPage(QWidget):
             elif status == "Cancelada":
                 cancel_session(int(ap.id))
             else:
-                update_session(int(ap.id), {"status": status})
+                update_session(int(ap.id), {"status": status, "artist_id": int(ap.artist_id)})
             QMessageBox.information(self, "Cita", "Estado actualizado.")
         except Exception as e:
             QMessageBox.critical(self, "Agenda", f"No se pudo actualizar: {e}")
@@ -999,22 +1019,8 @@ class AgendaPage(QWidget):
 
     # Menú contextual directo desde chip
     def _show_appt_context_menu(self, ap: Appt, global_pos: QPoint):
-        m = NoStatusTipMenu(self)  # <-- reemplazo de QMenu
-        m.setStyleSheet("""
-            QMenu {
-                background: #1f242b;
-                border: 1px solid rgba(255,255,255,0.14);
-                padding: 6px;
-            }
-            QMenu::item {
-                padding: 6px 10px;
-                background: transparent;
-            }
-            QMenu::item:selected {
-                background: rgba(255,255,255,0.10);
-                border-radius: 6px;
-            }
-        """)
+        m = make_styled_menu(self)
+
         act_open = m.addAction("Ver detalles")
         m.addSeparator()
         act_edit = m.addAction("Editar (reprogramar)")

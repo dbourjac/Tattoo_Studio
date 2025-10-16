@@ -141,7 +141,7 @@ class InventoryItemsPage(QWidget):
                         p.stock,
                         p.min_stock,
                         p.caduca,
-                        p.provedor,
+                        p.proveedor,
                         p.activo
                     ))
         except Exception as ex:

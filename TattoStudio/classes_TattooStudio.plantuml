@@ -1,0 +1,695 @@
+@startuml classes_TattooStudio
+set namespaceSeparator none
+class "AgendaPage" as ui.pages.agenda.AgendaPage {
+  abrir_cita
+  appts : List[Appt], list
+  artist_checks : Dict[str, QCheckBox], dict
+  artists : List[Artist]
+  artists_checks_box
+  btn_export
+  btn_new
+  btn_next
+  btn_prev
+  btn_today
+  cbo_status
+  cbo_view
+  crear_cita
+  current_date
+  current_view : str
+  day_end
+  day_start
+  day_view
+  dp
+  list_view
+  month_view
+  search
+  search_text : str
+  selected_artist_ids : List[str], list
+  selected_status : str
+  sidebar
+  step_min : int
+  views_stack
+  week_view
+  showEvent(e)
+}
+class "Appt" as ui.pages.agenda.Appt {
+  artist_id : str
+  client_id : Optional[int]
+  client_name : str
+  date
+  duration_min : int
+  id : str
+  service : str
+  start
+  status : str
+}
+class "ApptChip" as ui.pages.agenda.ApptChip {
+  ap
+  artist : Optional[Artist]
+  controller : str
+  contextMenuEvent(e)
+  mouseReleaseEvent(e)
+}
+class "Artist" as data.models.artist.Artist {
+  active : Mapped[bool]
+  id : Mapped[int]
+  name : Mapped[str]
+  portfolio_items
+  rate_commission : Mapped[float]
+  sessions
+}
+class "Artist" as ui.pages.agenda.Artist {
+  color : str
+  id : str
+  name : str
+}
+class "Base" as data.db.base.Base {
+}
+class "Base" as data.db.Base {
+}
+class "CashRegisterDialog" as ui.pages.cash_register.CashRegisterDialog {
+  btn_cancel
+  btn_ok
+  cbo_artist
+  cbo_method
+  cbo_session
+  chk_complete
+  txt_amount
+  txt_commission
+  txt_concept
+}
+class "ClickAwayDialog" as ui.pages.common.ClickAwayDialog {
+  body
+  body_l
+  header
+  outer
+}
+class "Client" as data.models.client.Client {
+  birthdate
+  city
+  consent_data
+  consent_image
+  consent_info
+  created_at
+  email
+  emergency_name
+  emergency_phone
+  emergency_relation
+  gender
+  health_allergies
+  health_anticoagulants
+  health_cardiac
+  health_coagulation
+  health_derm
+  health_diabetes
+  health_epilepsy
+  health_obs
+  health_preg_lact
+  health_substances
+  id
+  instagram
+  name
+  notes
+  phone
+  preferred_artist
+  preferred_artist_id
+  sessions
+  state
+}
+class "ClientDetailPage" as ui.pages.client_detail.ClientDetailPage {
+  artist_combo
+  artist_lbl
+  avatar
+  back_to_list
+  badge_state
+  badge_tag
+  btn_avatar
+  btn_back
+  btn_cancel
+  btn_delete
+  btn_edit
+  btn_save
+  cliente_cambiado
+  email_edit
+  email_lbl
+  header
+  ig_edit
+  ig_lbl
+  lst_citas
+  name_edit
+  name_lbl
+  next_lbl
+  phone_edit
+  phone_lbl
+  tab_citas
+  tab_consent
+  tab_emerg
+  tab_files
+  tab_notas
+  tab_perfil
+  tab_pref
+  tab_salud
+  tabs
+  load_client(client: dict)
+}
+class "ClientsPage" as ui.pages.clients.ClientsPage {
+  abrir_cliente
+  btn_export
+  btn_import
+  btn_new
+  cbo_order
+  crear_cliente
+  order_by : str
+  search
+  search_text : str
+  table
+  reload_from_db_and_refresh(keep_page: bool) -> None
+}
+class "DayView" as ui.pages.agenda.DayView {
+  artist_order : List[str]
+  artists : List[Artist]
+  date
+  day_end
+  day_start
+  now_line_hours
+  now_line_main
+  parent
+  step_min : int
+  subtitle
+  tbl
+  tbl_hours
+  configure(artists: List[Artist], date: QDate, start: QTime, end: QTime, step: int, artist_ids: List[str])
+  eventFilter(obj, ev)
+  render(appts: List[Appt], artist_lookup)
+}
+class "EditApptDialog" as ui.pages.agenda.EditApptDialog {
+  btn_cancel
+  btn_ok
+  cb_client
+  cbo_artist
+  cbo_status
+  dt_date
+  ed_service
+  sp_dur
+  sp_hour
+  sp_min
+  values() -> dict
+}
+class "FlowLayout" as ui.pages.common.FlowLayout {
+  addItem(item)
+  count()
+  expandingDirections()
+  hasHeightForWidth()
+  heightForWidth(width)
+  itemAt(i)
+  setGeometry(rect)
+  sizeHint()
+  takeAt(i)
+}
+class "FramelessPanel" as ui.pages.cash_register.FramelessPanel {
+  v
+  wrap
+  mouseMoveEvent(e)
+  mousePressEvent(e)
+  mouseReleaseEvent(e)
+}
+class "FramelessPanel" as ui.pages.staff_detail.FramelessPanel {
+  v
+  wrap
+  mouseMoveEvent(e)
+  mousePressEvent(e)
+  mouseReleaseEvent(e)
+}
+class "FramelessPopup" as ui.pages.common.FramelessPopup {
+  mouseMoveEvent(e)
+  mousePressEvent(e)
+  mouseReleaseEvent(e)
+}
+class "InventoryDashboardPage" as ui.pages.inventory_dashboard.InventoryDashboardPage {
+  ir_items : NoneType
+  ir_movimientos : NoneType
+  nuevo_item : NoneType
+}
+class "InventoryItemDetailPage" as ui.pages.inventory_item_detail.InventoryItemDetailPage {
+  avatar
+  badge_cat
+  badge_exp
+  badge_unit
+  btn_back
+  btn_new_adj
+  btn_new_in
+  header
+  kpi_hint
+  kpi_min
+  kpi_stock
+  lbl_name
+  lbl_sku
+  tab_mov
+  tab_prov
+  tab_res
+  tabs
+  tbl_mov
+  tbl_prov
+  v_cat
+  v_exp
+  v_min
+  v_name
+  v_prov
+  v_sku
+  v_stock
+  v_unit
+  volver
+  load_item(it: dict)
+}
+class "InventoryItemsPage" as ui.pages.inventory_items.InventoryItemsPage {
+  abrir_item : NoneType
+  btn_new
+  btn_next
+  btn_prev
+  cbo_cat
+  cbo_exp
+  cbo_state
+  current_page : int
+  f_cat : str
+  f_exp : str
+  f_state : str
+  lbl_page
+  nueva_entrada : NoneType
+  nuevo_ajuste : NoneType
+  nuevo_item : NoneType
+  page_size : int
+  search
+  search_text : str
+  tbl
+}
+class "InventoryMovementsPage" as ui.pages.inventory_movements.InventoryMovementsPage {
+  btn_back
+  cbo_tipo
+  dt_from
+  dt_to
+  lbl_count
+  nueva_entrada : NoneType
+  nueva_salida : NoneType
+  nuevo_ajuste : NoneType
+  tbl
+  volver
+}
+class "ListView" as ui.pages.agenda.ListView {
+  tbl
+  render(appts: List[Appt], artist_lookup)
+}
+class "LocalizedLineEdit" as ui.pages.staff_detail.LocalizedLineEdit {
+  contextMenuEvent(ev)
+}
+class "LoginDialog" as ui.login.LoginDialog {
+  btn_login
+  in_code
+  in_user
+  user : NoneType, dict
+}
+class "MainWindow" as ui.main_window.MainWindow {
+  agenda_page
+  brand_logo
+  btn_clients
+  btn_forms
+  btn_reports
+  btn_sched
+  btn_staff
+  btn_studio
+  btn_user
+  client_detail
+  clients_page
+  idx_agenda
+  idx_cash
+  idx_cliente_det
+  idx_clientes
+  idx_inv_adjust
+  idx_inv_detail
+  idx_inv_entry
+  idx_inv_items
+  idx_inv_moves
+  idx_inv_new_item
+  idx_inventory
+  idx_nuevo_cliente
+  idx_portafolios
+  idx_reportes
+  idx_staff
+  idx_staff_det
+  idx_staff_new
+  inventory_dash
+  inventory_detail
+  inventory_items
+  inventory_moves
+  new_client_page
+  reports_page
+  solicitar_switch_user
+  stack
+  staff_detail
+  staff_page
+  studio_page
+  user_panel
+  app()
+  mousePressEvent(event)
+}
+class "MonthView" as ui.pages.agenda.MonthView {
+  date
+  subtitle
+  tbl
+  configure(artists: List[Artist], date: QDate)
+  render(appts: List[Appt], artist_lookup)
+}
+class "NewApptDialog" as ui.pages.agenda.NewApptDialog {
+  btn_cancel
+  btn_ok
+  cb_client
+  cbo_artist
+  cbo_status
+  dt_date
+  ed_service
+  sp_dur
+  sp_hour
+  sp_min
+  values() -> dict
+}
+class "NewClientPage" as ui.pages.new_client.NewClientPage {
+  btn_cancelar
+  btn_guardar
+  btn_guardar_agendar
+  cb_artista
+  cb_genero
+  cb_origen
+  chk_alergias
+  chk_anticoagulantes
+  chk_cardiaco
+  chk_coagulacion
+  chk_consent_info
+  chk_datos
+  chk_derm
+  chk_diabetes
+  chk_emb_lact
+  chk_epilepsia
+  chk_sustancias
+  chk_uso_imagen
+  cliente_creado
+  in_ap1
+  in_ap2
+  in_ciudad
+  in_emerg_nombre
+  in_emerg_rel
+  in_emerg_tel
+  in_estado
+  in_fnac
+  in_ig
+  in_mail
+  in_nombres
+  in_tel
+  in_tutor_nombre
+  in_tutor_tel
+  lst_estilos
+  lst_zonas
+  tabs
+  txt_notas
+  txt_salud_obs
+  volver_atras
+  showEvent(ev)
+}
+class "NoStatusTipMenu" as ui.pages.common.NoStatusTipMenu {
+  event(e)
+}
+class "PanelUsuario" as ui.widgets.user_panel.PanelUsuario {
+  cambiar_tema
+  cambiar_usuario
+  chk_dark
+}
+class "PaymentDialog" as ui.pages.agenda.PaymentDialog {
+  btn_cancel
+  btn_ok
+  cbo_method
+  ed_note
+  lbl_comm_calc
+  sp_amount
+  sp_comm
+  values() -> dict
+}
+class "PaymentInput" as services.contracts.PaymentInput {
+  method : Literal
+}
+class "<color:red>PermissionError</color>" as services.permissions.PermissionError {
+}
+class "PortfolioItem" as data.models.portfolio.PortfolioItem {
+  artist
+  artist_id : Mapped[int]
+  caption : Mapped[Optional[str]]
+  created_at : Mapped[datetime]
+  id : Mapped[int]
+  path : Mapped[str]
+}
+class "Product" as data.models.product.Product {
+  category : Mapped[Optional[str]]
+  cost : Mapped[float]
+  id : Mapped[int]
+  min_stock : Mapped[int]
+  name : Mapped[str]
+  stock : Mapped[int]
+}
+class "ReportsPage" as ui.pages.reports.ReportsPage {
+  btn_custom
+  btn_export
+  btn_month
+  btn_today
+  btn_week
+  cbo_artist
+  cbo_payment
+  chart
+  chart_box
+  chart_view
+  custom_box
+  custom_from
+  custom_to
+  dt_from
+  dt_to
+  filter_artist : str
+  filter_payment : str
+  lbl_date
+  lbl_total
+  period : str
+  tbl
+  showEvent(e)
+}
+class "SessionCreate" as services.contracts.SessionCreate {
+  artist_id : int
+  client_id : int
+  end : datetime
+  notes : Optional[str]
+  price : float
+  start : datetime
+}
+class "SessionUpdate" as services.contracts.SessionUpdate {
+  commission_override : Optional[float]
+  end : datetime
+  notes : Optional[str]
+  price : float
+  start : datetime
+  status : Literal['Activa', 'Completada', 'En espera', 'Cancelada']
+}
+class "Setting" as data.models.setting.Setting {
+  key : Mapped[str]
+  value : Mapped[str]
+}
+class "StaffCard" as ui.pages.staff.StaffCard {
+  data : Dict
+  open_requested
+  contextMenuEvent(e)
+  enterEvent(e)
+  leaveEvent(e)
+  mouseReleaseEvent(e)
+  set_fixed_width(w: int)
+}
+class "StaffDetailPage" as ui.pages.staff_detail.StaffDetailPage {
+  act_color
+  act_edit
+  act_password
+  act_toggle
+  avatar
+  back_requested
+  btn_cancel
+  btn_kebab
+  btn_photo
+  btn_save
+  card
+  color_bar
+  color_dot
+  lbl_an_label
+  lbl_birth_label
+  lbl_email_label
+  lbl_full_label
+  lbl_ig_label
+  lbl_name
+  lbl_phone_label
+  lbl_role_chip
+  lbl_role_label
+  lbl_state_chip
+  lbl_username_label
+  lst_citas
+  menu_kebab
+  staff_saved
+  tab_citas
+  tab_docs
+  tab_port
+  tabs
+  val_artistname
+  val_birthdate
+  val_email
+  val_full_name
+  val_instagram
+  val_phone
+  val_role
+  val_username
+  enterEvent(ev)
+  eventFilter(obj, ev)
+  keyPressEvent(ev)
+  leaveEvent(ev)
+  load_staff(staff: Dict)
+  start_create_mode()
+}
+class "StaffPage" as ui.pages.staff.StaffPage {
+  abrir_staff
+  agregar_staff
+  btn_fab
+  cbo_order
+  cbo_role
+  cbo_state
+  filter_role : str
+  filter_state : str
+  flow
+  host
+  order_by : str
+  scroll
+  search
+  search_text : str
+  reload_from_db_and_refresh()
+  resizeEvent(e)
+  showEvent(e)
+}
+class "StudioPage" as ui.pages.studio.StudioPage {
+  ir_caja
+  ir_nueva_cita
+  ir_nuevo_cliente
+  ir_portafolios
+  logo_lbl
+  studio_name : str
+  resizeEvent(e)
+}
+class "TattooSession" as data.models.session_tattoo.TattooSession {
+  artist
+  artist_id : Mapped[int]
+  balance : float
+  client
+  client_id : Mapped[int]
+  commission_override : Mapped[Optional[float]]
+  end : Mapped[datetime]
+  id : Mapped[int]
+  notes : Mapped[Optional[str]]
+  price : Mapped[float]
+  start : Mapped[datetime]
+  status : Mapped[str]
+  total_paid : float
+  transaction : Optional['Transaction']
+  transactions : Mapped[List['Transaction']]
+}
+class "Transaction" as data.models.transaction.Transaction {
+  amount : Mapped[float]
+  artist
+  artist_id : Mapped[int]
+  commission_amount : Mapped[Optional[float]]
+  concept : Mapped[str]
+  created_at : Mapped[datetime]
+  date : Mapped[datetime]
+  deleted_flag : Mapped[bool]
+  id : Mapped[int]
+  method : Mapped[str]
+  session
+  session_id : Mapped[Optional[int]]
+  updated_at : Mapped[datetime]
+}
+class "User" as data.models.user.User {
+  artist_id
+  birthdate
+  created_at
+  email
+  id
+  instagram
+  is_active
+  last_login
+  name
+  password_hash
+  phone
+  role
+  username
+}
+class "WeekView" as ui.pages.agenda.WeekView {
+  artist_id : NoneType
+  date
+  day_end
+  day_start
+  now_line_hours
+  now_line_main
+  parent
+  step_min : int
+  subtitle
+  tbl
+  tbl_hours
+  configure(artists: List[Artist], date: QDate, start: QTime, end: QTime, step: int, artist_ids: List[str])
+  eventFilter(obj, ev)
+  render(appts: List[Appt], artist_lookup)
+}
+class "_FramelessDialog" as ui.pages.agenda._FramelessDialog {
+  body
+  body_l
+  header
+  outer
+  closeEvent(e)
+  eventFilter(obj, ev)
+  mouseMoveEvent(e)
+  mousePressEvent(e)
+  mouseReleaseEvent(e)
+  showEvent(e)
+}
+data.models.artist.Artist --|> data.db.base.Base
+data.models.client.Client --|> data.db.base.Base
+data.models.portfolio.PortfolioItem --|> data.db.base.Base
+data.models.product.Product --|> data.db.base.Base
+data.models.session_tattoo.TattooSession --|> data.db.base.Base
+data.models.setting.Setting --|> data.db.base.Base
+data.models.transaction.Transaction --|> data.db.base.Base
+data.models.user.User --|> data.db.base.Base
+ui.pages.agenda.EditApptDialog --|> ui.pages.agenda._FramelessDialog
+ui.pages.agenda.NewApptDialog --|> ui.pages.agenda._FramelessDialog
+ui.pages.agenda.PaymentDialog --|> ui.pages.agenda._FramelessDialog
+ui.pages.cash_register.CashRegisterDialog --|> ui.pages.cash_register.FramelessPanel
+ui.pages.agenda.AgendaPage --> ui.pages.agenda.Artist : artists
+ui.pages.agenda.AgendaPage --* ui.main_window.MainWindow : agenda_page
+ui.pages.agenda.DayView --* ui.pages.agenda.AgendaPage : day_view
+ui.pages.agenda.ListView --* ui.pages.agenda.AgendaPage : list_view
+ui.pages.agenda.MonthView --* ui.pages.agenda.AgendaPage : month_view
+ui.pages.agenda.WeekView --* ui.pages.agenda.AgendaPage : week_view
+ui.pages.client_detail.ClientDetailPage --* ui.main_window.MainWindow : client_detail
+ui.pages.clients.ClientsPage --* ui.main_window.MainWindow : clients_page
+ui.pages.common.FlowLayout --* ui.pages.staff.StaffPage : flow
+ui.pages.common.NoStatusTipMenu --* ui.pages.staff_detail.StaffDetailPage : menu_kebab
+ui.pages.inventory_dashboard.InventoryDashboardPage --* ui.main_window.MainWindow : inventory_dash
+ui.pages.inventory_item_detail.InventoryItemDetailPage --* ui.main_window.MainWindow : inventory_detail
+ui.pages.inventory_items.InventoryItemsPage --* ui.main_window.MainWindow : inventory_items
+ui.pages.inventory_movements.InventoryMovementsPage --* ui.main_window.MainWindow : inventory_moves
+ui.pages.new_client.NewClientPage --* ui.main_window.MainWindow : new_client_page
+ui.pages.reports.ReportsPage --* ui.main_window.MainWindow : reports_page
+ui.pages.staff.StaffPage --* ui.main_window.MainWindow : staff_page
+ui.pages.staff_detail.StaffDetailPage --* ui.main_window.MainWindow : staff_detail
+ui.pages.studio.StudioPage --* ui.main_window.MainWindow : studio_page
+ui.widgets.user_panel.PanelUsuario --* ui.main_window.MainWindow : user_panel
+ui.pages.agenda.AgendaPage --o ui.pages.agenda.DayView : parent
+ui.pages.agenda.AgendaPage --o ui.pages.agenda.WeekView : parent
+ui.pages.agenda.Appt --o ui.pages.agenda.ApptChip : ap
+ui.pages.agenda.Artist --o ui.pages.agenda.ApptChip : artist
+ui.pages.agenda.Artist --o ui.pages.agenda.DayView : artists
+@enduml

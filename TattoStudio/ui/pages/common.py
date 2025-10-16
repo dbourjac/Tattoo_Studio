@@ -38,7 +38,7 @@ from PyQt5.QtCore import Qt, QPoint, QRect, QSize, QEvent, QRectF
 from PyQt5.QtGui import QPainter, QPixmap, QBrush, QPen, QColor, QPainterPath
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QInputDialog, QLineEdit, QMessageBox,
-    QMenu, QDialog, QLayout, QSizePolicy
+    QMenu, QDialog, QLayout, QSizePolicy, QFrame, 
 )
 
 # SQLAlchemy / sesión
@@ -48,7 +48,6 @@ from data.db.session import SessionLocal
 # RBAC & sesión actual (ya presentes en tu proyecto)
 from services.permissions import assistant_needs_code, verify_master_code, elevate_for, can
 from services.contracts import get_current_user
-
 
 # ------------------------------------------------------------
 # Configuración
@@ -462,3 +461,56 @@ def fmt_dt_local(value: Any, fmt: str = "%d/%m/%Y %H:%M") -> str:
 
     best = sorted(candidates, key=score)[0]
     return best.strftime(fmt)
+
+# ------------------------------------------------------------
+# Menús estilizados reutilizables (hover con sombreado)
+# ------------------------------------------------------------
+MENU_STYLESHEET = """
+QMenu {
+    background: #1f242b;
+    border: 1px solid rgba(255,255,255,0.14);
+    padding: 6px;
+}
+QMenu::item {
+    padding: 6px 10px;
+    background: transparent;
+    border-radius: 6px;
+}
+QMenu::item:selected {
+    background: rgba(255,255,255,0.10);
+}
+"""
+
+def make_styled_menu(parent: QWidget = None) -> QMenu:
+    m = QMenu(parent)
+    m.setStyleSheet(MENU_STYLESHEET)
+    return m
+
+# --- ClickAwayDialog: popup con cierre al perder foco / click fuera ---
+class ClickAwayDialog(QDialog):
+    def __init__(self, title: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+        root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
+        self.outer = QFrame(self); self.outer.setObjectName("outer"); root.addWidget(self.outer)
+        wrap = QVBoxLayout(self.outer); wrap.setContentsMargins(14,14,14,14); wrap.setSpacing(10)
+
+        self.header = QLabel(title, self.outer); self.header.setStyleSheet("font-weight:700; background:transparent;")
+        wrap.addWidget(self.header)
+
+        self.body = QFrame(self.outer); self.body.setStyleSheet("background: transparent;")
+        self.body_l = QVBoxLayout(self.body); self.body_l.setContentsMargins(0,0,0,0); self.body_l.setSpacing(8)
+        wrap.addWidget(self.body)
+
+        self.setStyleSheet("""
+        QDialog { background: transparent; }
+        QFrame#outer {
+            background: #1f242b;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 10px;
+        }
+        QLabel { background: transparent; }
+        """)

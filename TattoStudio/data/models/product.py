@@ -15,6 +15,5 @@ class Product(Base):
     stock: Mapped[int] = mapped_column(Integer, default=0)
     min_stock: Mapped[int] = mapped_column(Integer, default=0)
     caduca: Mapped[bool] = mapped_column(Boolean, default=False)
-    provedor: Mapped[str] = mapped_column(String(50) )
+    proveedor: Mapped[str] = mapped_column(String(50) )
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
-  

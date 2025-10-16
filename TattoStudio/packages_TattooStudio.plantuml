@@ -1,0 +1,212 @@
+@startuml packages_TattooStudio
+set namespaceSeparator none
+package "data" as data {
+}
+package "data.db" as data.db {
+}
+package "data.db.base" as data.db.base {
+}
+package "data.db.session" as data.db.session {
+}
+package "data.models" as data.models {
+}
+package "data.models.artist" as data.models.artist {
+}
+package "data.models.client" as data.models.client {
+}
+package "data.models.portfolio" as data.models.portfolio {
+}
+package "data.models.product" as data.models.product {
+}
+package "data.models.session_tattoo" as data.models.session_tattoo {
+}
+package "data.models.setting" as data.models.setting {
+}
+package "data.models.transaction" as data.models.transaction {
+}
+package "data.models.user" as data.models.user {
+}
+package "data.tools" as data.tools {
+}
+package "data.tools.2025_10_09_add_txn_timestamps" as data.tools.2025_10_09_add_txn_timestamps {
+}
+package "data.tools.backfill_preferred_artist" as data.tools.backfill_preferred_artist {
+}
+package "data.tools.migrate_client_columns" as data.tools.migrate_client_columns {
+}
+package "data.tools.migrate_users_add_fields" as data.tools.migrate_users_add_fields {
+}
+package "data.tools.patch_add_concept_to_transactions" as data.tools.patch_add_concept_to_transactions {
+}
+package "data.tools.purge_artists" as data.tools.purge_artists {
+}
+package "data.tools.seed" as data.tools.seed {
+}
+package "services" as services {
+}
+package "services.auth" as services.auth {
+}
+package "services.contracts" as services.contracts {
+}
+package "services.permissions" as services.permissions {
+}
+package "services.sessions" as services.sessions {
+}
+package "ui" as ui {
+}
+package "ui.login" as ui.login {
+}
+package "ui.main_window" as ui.main_window {
+}
+package "ui.pages" as ui.pages {
+}
+package "ui.pages.agenda" as ui.pages.agenda {
+}
+package "ui.pages.cash_register" as ui.pages.cash_register {
+}
+package "ui.pages.client_detail" as ui.pages.client_detail {
+}
+package "ui.pages.clients" as ui.pages.clients {
+}
+package "ui.pages.common" as ui.pages.common {
+}
+package "ui.pages.inventory_dashboard" as ui.pages.inventory_dashboard {
+}
+package "ui.pages.inventory_item_detail" as ui.pages.inventory_item_detail {
+}
+package "ui.pages.inventory_items" as ui.pages.inventory_items {
+}
+package "ui.pages.inventory_movements" as ui.pages.inventory_movements {
+}
+package "ui.pages.new_client" as ui.pages.new_client {
+}
+package "ui.pages.reports" as ui.pages.reports {
+}
+package "ui.pages.staff" as ui.pages.staff {
+}
+package "ui.pages.staff_detail" as ui.pages.staff_detail {
+}
+package "ui.pages.studio" as ui.pages.studio {
+}
+package "ui.styles" as ui.styles {
+}
+package "ui.styles.themes" as ui.styles.themes {
+}
+package "ui.widgets" as ui.widgets {
+}
+package "ui.widgets.user_panel" as ui.widgets.user_panel {
+}
+data --> data.db.session
+data.db.session --> data.db.base
+data.db.session --> data.models
+data.models --> data.models.artist
+data.models --> data.models.client
+data.models --> data.models.portfolio
+data.models --> data.models.product
+data.models --> data.models.session_tattoo
+data.models --> data.models.setting
+data.models --> data.models.transaction
+data.models --> data.models.user
+data.models.artist --> data.db.base
+data.models.client --> data.db.base
+data.models.portfolio --> data.db.base
+data.models.product --> data.db.base
+data.models.session_tattoo --> data.db.base
+data.models.setting --> data.db.base
+data.models.transaction --> data.db.base
+data.models.user --> data.db.base
+data.tools.purge_artists --> data.db.session
+data.tools.purge_artists --> data.models.artist
+data.tools.purge_artists --> data.models.session_tattoo
+data.tools.purge_artists --> data.models.transaction
+data.tools.purge_artists --> data.models.user
+data.tools.seed --> data.db.session
+data.tools.seed --> data.models
+data.tools.seed --> data.models.artist
+data.tools.seed --> data.models.client
+data.tools.seed --> data.models.product
+data.tools.seed --> data.models.session_tattoo
+data.tools.seed --> data.models.transaction
+data.tools.seed --> data.models.user
+data.tools.seed --> services.auth
+services.auth --> data.models.user
+services.permissions --> data.models.setting
+services.permissions --> services
+services.permissions --> services.contracts
+services.sessions --> data.db.session
+services.sessions --> data.models
+services.sessions --> data.models.artist
+services.sessions --> data.models.session_tattoo
+services.sessions --> data.models.transaction
+ui.login --> data.db.session
+ui.login --> services.auth
+ui.main_window --> services.contracts
+ui.main_window --> ui.login
+ui.main_window --> ui.pages
+ui.main_window --> ui.pages.cash_register
+ui.main_window --> ui.styles.themes
+ui.main_window --> ui.widgets.user_panel
+ui.pages --> ui.pages.agenda
+ui.pages --> ui.pages.client_detail
+ui.pages --> ui.pages.clients
+ui.pages --> ui.pages.common
+ui.pages --> ui.pages.inventory_dashboard
+ui.pages --> ui.pages.inventory_item_detail
+ui.pages --> ui.pages.inventory_items
+ui.pages --> ui.pages.inventory_movements
+ui.pages --> ui.pages.new_client
+ui.pages --> ui.pages.reports
+ui.pages --> ui.pages.staff
+ui.pages --> ui.pages.staff_detail
+ui.pages --> ui.pages.studio
+ui.pages.agenda --> data.db.session
+ui.pages.agenda --> data.models.artist
+ui.pages.agenda --> data.models.client
+ui.pages.agenda --> services.sessions
+ui.pages.agenda --> ui.pages.common
+ui.pages.cash_register --> data.db.session
+ui.pages.cash_register --> data.models.artist
+ui.pages.cash_register --> data.models.session_tattoo
+ui.pages.cash_register --> data.models.transaction
+ui.pages.client_detail --> data.db.session
+ui.pages.client_detail --> data.models.artist
+ui.pages.client_detail --> data.models.client
+ui.pages.client_detail --> data.models.session_tattoo
+ui.pages.client_detail --> services.contracts
+ui.pages.client_detail --> services.permissions
+ui.pages.client_detail --> ui.pages.common
+ui.pages.clients --> data.db.session
+ui.pages.clients --> data.models.artist
+ui.pages.clients --> data.models.client
+ui.pages.clients --> data.models.session_tattoo
+ui.pages.clients --> services.contracts
+ui.pages.clients --> ui.pages.common
+ui.pages.common --> data.db.session
+ui.pages.common --> services.contracts
+ui.pages.common --> services.permissions
+ui.pages.new_client --> data.db.session
+ui.pages.new_client --> data.models.artist
+ui.pages.new_client --> data.models.client
+ui.pages.new_client --> ui.pages.common
+ui.pages.reports --> data.db.session
+ui.pages.reports --> data.models.artist
+ui.pages.reports --> data.models.client
+ui.pages.reports --> data.models.session_tattoo
+ui.pages.reports --> data.models.transaction
+ui.pages.reports --> services.contracts
+ui.pages.reports --> services.permissions
+ui.pages.reports --> ui.pages.common
+ui.pages.staff --> data.db.session
+ui.pages.staff --> data.models.artist
+ui.pages.staff --> data.models.user
+ui.pages.staff --> services.contracts
+ui.pages.staff --> ui.pages.common
+ui.pages.staff_detail --> data.db.session
+ui.pages.staff_detail --> data.models.artist
+ui.pages.staff_detail --> data.models.session_tattoo
+ui.pages.staff_detail --> data.models.user
+ui.pages.staff_detail --> services
+ui.pages.staff_detail --> services.contracts
+ui.pages.staff_detail --> services.permissions
+ui.pages.staff_detail --> ui.pages.common
+@enduml
