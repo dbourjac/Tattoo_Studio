@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton,
     QFrame, QStatusBar, QStackedWidget, QSizePolicy, QDialog
 )
-
+from ui.pages.new_item import NewItemPage
 from ui.widgets.user_panel import PanelUsuario
 from ui.styles.themes import apply_theme
 
@@ -170,9 +170,9 @@ class MainWindow(QMainWindow):
         self.idx_inv_moves    = self.stack.addWidget(self.inventory_moves)
         self.inventory_dash.ir_items        = lambda: self._ir(self.idx_inv_items)
         self.inventory_dash.ir_movimientos  = lambda: self._ir(self.idx_inv_moves)
-        self.inventory_dash.nuevo_item      = lambda: self._ir(self.idx_inv_new_item)
+        self.inventory_dash.nuevo_item      = self._abrir_popup_nuevo_item
         self.inventory_items.abrir_item     = lambda it: (self.inventory_detail.load_item(it), self._ir(self.idx_inv_detail))
-        self.inventory_items.nuevo_item     = lambda: self._ir(self.idx_inv_new_item)
+        self.inventory_items.nuevo_item     = self._abrir_popup_nuevo_item
         self.inventory_items.nueva_entrada  = lambda it: self._ir(self.idx_inv_entry)
         self.inventory_items.nuevo_ajuste   = lambda it: self._ir(self.idx_inv_adjust)
         self.inventory_detail.volver.connect(lambda: self._ir(self.idx_inv_items))
@@ -594,3 +594,30 @@ class MainWindow(QMainWindow):
             self.user_panel.hide()
             self.btn_user.setChecked(False)
         super().mousePressEvent(event)
+
+
+    def _on_item_creado(self, sku):
+      print(f"✅ Nuevo ítem creado con SKU: {sku}")
+    # Aquí podrías recargar una tabla, refrescar datos, etc.
+   
+      self.inventory_items._seed_mock();
+      self.inventory_items._refresh()
+
+    def _abrir_popup_nuevo_item(self):
+    # Crear diálogo modal
+      dialog = QDialog(self)
+      dialog.setWindowTitle("Nuevo item")
+      dialog.setModal(True)  # bloquea la ventana principal
+
+    # Agregar el formulario dentro del diálogo
+      layout = QVBoxLayout(dialog)
+      form = NewItemPage()
+      layout.addWidget(form)
+      form.item_creado.connect(self._on_item_creado)
+    # Cuando se cierre el formulario (por el botón "Cancelar" o al guardar)
+    # cerramos también el QDialog
+      form.btn_guardar.clicked.connect(dialog.accept)
+      form.btn_cancelar.clicked.connect(dialog.reject)
+     
+    # Mostrar el popup
+      dialog.exec_()

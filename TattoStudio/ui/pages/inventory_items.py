@@ -3,8 +3,13 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
-    QPushButton, QTableWidget, QTableWidgetItem, QFrame, QSizePolicy, QSpacerItem
+    QPushButton, QTableWidget, QTableWidgetItem, QFrame, QSizePolicy, QSpacerItem,QMessageBox
 )
+from sqlalchemy.orm import Session
+
+from data.db.session import SessionLocal
+from data.models.product import Product
+from typing import List
 
 class InventoryItemsPage(QWidget):
     """
@@ -120,44 +125,36 @@ class InventoryItemsPage(QWidget):
     # ---------- datos mock ----------
     def _seed_mock(self):
         # (sku, nombre, cat, unidad, stock, minimo, caduca(bool), proveedor, activo(bool))
-        self._all = [
-            # Tintas
-            ("TIN-NE-250", "Tinta Negra 250ml",       "Tintas",      "ml",    3,   5,  True,  "Dynamic",   True),
-            ("TIN-RJ-030", "Tinta Roja 30ml",         "Tintas",      "ml",   10,   6,  True,  "Eternal",   True),
-            ("TIN-AZ-030", "Tinta Azul 30ml",         "Tintas",      "ml",    7,   6,  True,  "Eternal",   True),
-            ("TIN-BK-120", "Blackwork 120ml",         "Tintas",      "ml",   14,  10,  True,  "Solid Ink", True),
-            ("TIN-WH-120", "Blanco 120ml",            "Tintas",      "ml",    2,   4,  True,  "Dynamic",   True),
-            # Agujas / cartuchos
-            ("AGJ-3RL",    "Cartucho 3RL",            "Agujas",      "pieza",  5,  15,  False, "Cheyenne",  True),
-            ("AGJ-5RL",    "Cartucho 5RL",            "Agujas",      "pieza", 24,  10,  False, "Kwadron",   True),
-            ("AGJ-7RM",    "Cartucho 7RM",            "Agujas",      "pieza", 12,  10,  False, "Kwadron",   True),
-            # EPP
-            ("EPP-GUA-M",  "Guantes M",               "EPP",         "par",    2,  10,  False, "Kimberly",  True),
-            ("EPP-GUA-L",  "Guantes L",               "EPP",         "par",   16,  10,  False, "Kimberly",  True),
-            ("EPP-MASC",   "Cubrebocas",              "EPP",         "pieza", 40,  30,  False, "3M",        True),
-            ("EPP-BATA",   "Bata desechable",         "EPP",         "pieza",  0,  10,  False, "MedCare",   False),  # Archivado
-            # Limpieza
-            ("LIM-ALC",    "Alcohol Isopropílico",    "Limpieza",    "ml",   900, 500, False, "3M",        True),
-            ("LIM-JAB",    "Jabón Verde 1L",          "Limpieza",    "ml",   350, 200, False, "Cosmo",     True),
-            ("LIM-SLN",    "Solución salina 500ml",   "Limpieza",    "ml",   120,  80, False, "KOHL",      True),
-            # Aftercare
-            ("AFC-CREM",   "Crema post tattoo 50g",   "Aftercare",   "pz",    18,  20,  True,  "Hustle",    True),
-            ("AFC-FILM",   "Film protector 10m",      "Aftercare",   "rollo",  6,   5,  False, "Saniderm",  True),
-            # Consumibles
-            ("CON-RAS",    "Rasuradores desechables", "Consumibles", "pz",    70,  50, False, "Gillette",  True),
-            ("CON-GASA",   "Gasa estéril",            "Consumibles", "pz",     8,  20, False, "BD",        True),
-            ("CON-TOA",    "Toallas desechables",     "Consumibles", "pz",   180, 120, False, "Kimsoft",   True),
-            ("CON-BOT",    "Botellas 250ml",          "Consumibles", "pz",    20,  20, False, "Generic",   True),
-            ("CON-BAN",    "Banditas adhesivas",      "Consumibles", "pz",    14,  30, False, "Curad",     True),
-            ("CON-PAÑ",    "Pañitos húmedos",         "Consumibles", "pz",    22,  18, False, "Kleenex",   True),
-        ]
+        self._all = []
+        try:
+            with SessionLocal() as db:
+                products: List[Product] = (
+                    db.query(Product)
+                    .all()
+                )
+                for p in products:
+                    self._all.append((
+                        p.sku,
+                        p.name,
+                        p.category ,
+                        p.unidad,
+                        p.stock,
+                        p.min_stock,
+                        p.caduca,
+                        p.provedor,
+                        p.activo
+                    ))
+        except Exception as ex:
+            QMessageBox.critical(self, "BD", f"Error al cargar productos: {ex}")
+            self._all = []
+
 
     # ---------- lógica UI ----------
     def _apply_filters(self):
         txt = self.search_text.lower().strip()
 
         def keep(r):
-            sku, nombre, cat, _, _, _, caduca, _, activo = r
+            sku, nombre, cat, _, _, _, caduca, _,activo= r
             if self.f_cat != "Todas" and cat != self.f_cat: return False
             if self.f_state == "Activos" and not activo: return False
             if self.f_state == "Archivados" and activo: return False
