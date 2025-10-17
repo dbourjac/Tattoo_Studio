@@ -1,32 +1,24 @@
-# ui/pages/inventory_dashboard.py
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QSizePolicy, QSpacerItem, QListWidget, QListWidgetItem
 )
+from data.db.session import SessionLocal
+from data.models.product import Product
+from datetime import date, timedelta, datetime
+
 
 class InventoryDashboardPage(QWidget):
-    """
-    Dashboard de Inventario (mock)
-    - KPIs: Ítems activos, Bajo stock, Por caducar, Consumo (mes)
-    - Toolbar con accesos rápidos: Nuevo ítem / Ver ítems / Movimientos
-    - Alertas: Bajo stock, Por caducar (≤30 días)
-    Señales (se exponen como callables para que MainWindow las conecte):
-      ir_items, ir_movimientos, nuevo_item
-    """
     ir_items = None
     ir_movimientos = None
     nuevo_item = None
 
     def __init__(self):
         super().__init__()
-
-        # señales simples como atributos; MainWindow las asigna
         self.ir_items = lambda: None
         self.ir_movimientos = lambda: None
         self.nuevo_item = lambda: None
 
-        # Todos los textos sin “bloque” de fondo
         self.setStyleSheet("QLabel { background: transparent; }")
 
         root = QVBoxLayout(self)
@@ -39,15 +31,22 @@ class InventoryDashboardPage(QWidget):
         root.addWidget(title)
 
         # ===== KPIs =====
-        kpis = QHBoxLayout()
-        kpis.setSpacing(12)
-        kpis.addWidget(self._kpi("Ítems activos", "128"))
-        kpis.addWidget(self._kpi("Bajo stock", "7"))
-        kpis.addWidget(self._kpi("Por caducar", "3"))
-        kpis.addWidget(self._kpi("Consumo (mes)", "$4,320"))
-        root.addLayout(kpis)
+        self.kpi_layout = QHBoxLayout()
+        self.kpi_layout.setSpacing(12)
+        root.addLayout(self.kpi_layout)
 
-        # ===== Toolbar de acciones (estilo pastilla) =====
+        # Guardamos referencias para actualizarlas después
+        self.lbl_activos = self._kpi("Ítems activos", "0")
+        self.lbl_bajo_stock = self._kpi("Bajo stock", "0")
+        self.lbl_por_caducar = self._kpi("Por caducar", "0")
+        self.lbl_consumo = self._kpi("Consumo (mes)", "$0")
+
+        self.kpi_layout.addWidget(self.lbl_activos)
+        self.kpi_layout.addWidget(self.lbl_bajo_stock)
+        self.kpi_layout.addWidget(self.lbl_por_caducar)
+        self.kpi_layout.addWidget(self.lbl_consumo)
+
+        # ===== Toolbar =====
         toolbar = QFrame()
         toolbar.setObjectName("Toolbar")
         tb = QHBoxLayout(toolbar)
@@ -78,33 +77,23 @@ class InventoryDashboardPage(QWidget):
 
         # Bajo stock
         low = self._card("Bajo stock")
-        low_list = self._clean_list()
-        for txt in [
-            "Guantes M (stock: 2 / min: 10)",
-            "Cartucho 3RL (stock: 5 / min: 15)",
-            "Gasa estéril (stock: 8 / min: 20)",
-        ]:
-            QListWidgetItem(txt, low_list)
-        low.layout().addWidget(low_list)
+        self.low_list = self._clean_list()
+        low.layout().addWidget(self.low_list)
         alerts_box.addWidget(low)
 
         # Por caducar
         exp = self._card("Por caducar (≤30 días)")
-        exp_list = self._clean_list()
-        for txt in [
-            "Tinta negra Lote N-22 — 25/09/2025",
-            "Solución salina Lote S-10 — 18/09/2025",
-            "Crema post Lote C-07 — 29/09/2025",
-        ]:
-            QListWidgetItem(txt, exp_list)
-        exp.layout().addWidget(exp_list)
+        self.exp_list = self._clean_list()
+        exp.layout().addWidget(self.exp_list)
         alerts_box.addWidget(exp)
 
         root.addLayout(alerts_box)
 
+        # 🔹 Llamar a refrescar datos al iniciar
+        self.refrescar_datos()
+
     # ---------- helpers ----------
     def _kpi(self, title: str, value: str) -> QFrame:
-        """Card KPI con título fino y valor destacado."""
         card = QFrame()
         card.setObjectName("CardKPI")
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -120,10 +109,11 @@ class InventoryDashboardPage(QWidget):
 
         lay.addWidget(t)
         lay.addWidget(v)
+
+        card.value_label = v  # Guardamos referencia al QLabel de valor
         return card
 
     def _card(self, title: str) -> QFrame:
-        """Card genérica para secciones."""
         card = QFrame()
         card.setObjectName("Card")
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -135,11 +125,9 @@ class InventoryDashboardPage(QWidget):
         head = QLabel(title)
         head.setStyleSheet("font-weight:700;")
         lay.addWidget(head)
-
         return card
 
     def _clean_list(self) -> QListWidget:
-        """Lista sin bordes ni fondo sólido; ítems con alto cómodo."""
         lst = QListWidget()
         lst.setFrameShape(QFrame.NoFrame)
         lst.setUniformItemSizes(True)
@@ -149,3 +137,56 @@ class InventoryDashboardPage(QWidget):
             "QListWidget::item:selected { background: rgba(0,0,0,0.07); }"
         )
         return lst
+
+    # ---------- nueva función ----------
+    def refrescar_datos(self):
+        """Actualiza KPIs y listas desde la base de datos."""
+        session = SessionLocal()
+        try:
+            # 🔹 Ítems activos
+            activos = session.query(Product).filter(Product.activo == True).count()
+
+            # 🔹 Bajo stock
+            bajo_stock = session.query(Product).filter(
+                Product.activo == True, Product.stock < Product.min_stock
+            ).count()
+
+            # 🔹 Por caducar
+            fecha_limite = date.today() + timedelta(days=30)
+            productos_caducables = session.query(Product).filter(Product.caduca == True).all()
+            por_caducar = [
+                p for p in productos_caducables
+                if p.fechacaducidad and self._esta_por_caducar(p.fechacaducidad, fecha_limite)
+            ]
+
+            # 🔹 Consumo (mes) → puedes reemplazarlo con una consulta real si tienes tabla de movimientos
+            consumo_mes = 0  
+
+            # 🔹 Actualizar KPIs
+            self.lbl_activos.value_label.setText(str(activos))
+            self.lbl_bajo_stock.value_label.setText(str(bajo_stock))
+            self.lbl_por_caducar.value_label.setText(str(len(por_caducar)))
+            self.lbl_consumo.value_label.setText(f"${consumo_mes:,}")
+
+            # 🔹 Actualizar listas
+            self.low_list.clear()
+            for p in session.query(Product).filter(Product.stock < Product.min_stock, Product.activo == True).all():
+                QListWidgetItem(f"{p.name} (stock: {p.stock}/{p.min_stock})", self.low_list)
+
+            self.exp_list.clear()
+            for p in por_caducar:
+                fecha = datetime.strptime(p.fechacaducidad, "%Y-%m-%d").date()
+                QListWidgetItem(f"{p.name} — {fecha.strftime('%d/%m/%Y')}", self.exp_list)
+
+        except Exception as e:
+            print(f"⚠️ Error al refrescar datos del inventario: {e}")
+        finally:
+            session.close()
+
+    def _esta_por_caducar(self, fecha_str, fecha_limite):
+        """Convierte el string y verifica si está dentro del rango."""
+        try:
+            fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+            return fecha <= fecha_limite
+        except ValueError:
+            return False

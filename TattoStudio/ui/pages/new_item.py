@@ -1,238 +1,159 @@
-# ui/pages/new_item.py
-from typing import Optional
-import random
-
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QDate
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFormLayout,
     QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
-    QMessageBox, QSizePolicy, QFrame
+    QMessageBox, QSizePolicy, QCalendarWidget, QDialog, QDialogButtonBox
 )
-
+import random
+from typing import Optional
 from data.db.session import SessionLocal
 from data.models.product import Product
 
-
-def crear_producto(
-    sku: str,
-    name: str,
-    category: Optional[str],
-    unidad: str,
-    cost: float,
-    stock: int,
-    min_stock: int,
-    caduca: bool,
-    proveedor: str,
-    activo: bool,
-) -> Product:
-    """Inserta un nuevo producto en la base de datos y lo retorna."""
-    session = SessionLocal()
-    try:
-        nuevo = Product(
-            sku=sku,
-            name=name,
-            category=category or "consumibles",
-            unidad=unidad,
-            cost=cost,
-            stock=stock,
-            min_stock=min_stock,
-            caduca=caduca,
-            proveedor=proveedor,
-            activo=activo,
-        )
-        session.add(nuevo)
-        session.commit()
-        session.refresh(nuevo)
-        return nuevo
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-
-
 class NewItemPage(QWidget):
-    # señal que escucha MainWindow para refrescar la tabla
-    item_creado = pyqtSignal(str)  # SKU
+    item_creado = pyqtSignal(str) 
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-        self.setWindowTitle("Nuevo ítem")
-        self.setMinimumWidth(720)
-        self.setMinimumHeight(640)
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Nuevo item")
+        self.setMinimumHeight(860)
+        self.setMinimumWidth(560)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.setObjectName("NewItemPage")
-
-        # QSS local (colores coherentes con tu theme; sin forzar tamaños de letra)
-        self.setStyleSheet("""
-        #NewItemPage QLabel { background: transparent; color: #E5E7EB; }
-        #Card { background: #2A2F34; border: 1px solid #495057; border-radius: 16px; }
-
-        /* inputs altos y con padding generoso */
-        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-            background: #1F2429; color: #E5E7EB;
-            border: 1px solid #3B4148; border-radius: 12px;
-            padding: 12px 14px;
-            min-height: 54px;
-            selection-background-color: #374151;
-        }
-        QLineEdit::placeholder { color: #9CA3AF; }
-
-        /* checkboxes sin fondo */
-        QCheckBox { background: transparent; spacing: 10px; color: #E5E7EB; }
-
-        /* botones */
-        QPushButton#Primary {
-            background: #3B82F6; color: white; border: none;
-            border-radius: 12px; padding: 10px 18px; font-weight: 700;
-        }
-        QPushButton#Primary:hover { background: #2563EB; }
-        QPushButton#Ghost {
-            background: transparent; color: #E5E7EB;
-            border: 1px solid #495057; border-radius: 12px; padding: 10px 18px;
-        }
-        QPushButton#Ghost:hover { border-color: #7b8190; }
-        """)
+        self.setStyleSheet("QLabel { background: transparent; font-size: 11pt;}")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(36, 32, 36, 32)
-        root.setSpacing(28)
+        root.setContentsMargins(32, 32, 32, 32)
+        root.setSpacing(20)
 
         # ---- Título ----
-        title = QLabel("Nuevo ítem")
+        title = QLabel("Nuevo item")
         title.setAlignment(Qt.AlignHCenter)
-        title.setStyleSheet("font-size: 30px; font-weight: 900; margin: 0 0 16px;")
+        title.setStyleSheet("font-size: 22pt; font-weight: bold; margin-bottom: 16px;")
         root.addWidget(title)
 
-        # ---- Card ----
-        card = QFrame()
-        card.setObjectName("Card")
-        card_lay = QVBoxLayout(card)
-        card_lay.setContentsMargins(28, 24, 28, 24)
-        card_lay.setSpacing(22)
-        root.addWidget(card)
-
-        # ---- Formulario dentro de la card ----
+        # ---- Formulario ----
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        form.setFormAlignment(Qt.AlignTop)
-        form.setHorizontalSpacing(32)   # aire label ↔ campo
-        form.setVerticalSpacing(24)     # aire entre filas (además del wrapper)
-        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        card_lay.addLayout(form)
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setSpacing(16)
 
-        # Wrapper: añade margen vertical por fila para evitar "encimado"
-        def wrap(field, min_h=60, top=10, bottom=10):
-            box = QWidget()
-            box.setMinimumHeight(min_h)
-            box.setStyleSheet("background: transparent;")
-            lay = QVBoxLayout(box)
-            lay.setContentsMargins(0, top, 0, bottom)  # margen POR FILA
-            lay.setSpacing(0)
-            lay.addWidget(field)
-            return box
-
-        # --- Campos ---
-
-        # SKU autogenerado
         self.in_sku = QLineEdit()
         self.in_sku.setReadOnly(True)
-        form.addRow("SKU:", wrap(self.in_sku))
+        self.in_sku.setMinimumHeight(36)
+        form.addRow("SKU:", self.in_sku)
 
-        # Nombre
         self.in_nombre = QLineEdit()
         self.in_nombre.setPlaceholderText("Nombre del producto *")
-        form.addRow("Nombre:", wrap(self.in_nombre))
+        self.in_nombre.setMinimumHeight(36)
+        form.addRow("Nombre:", self.in_nombre)
 
-        # Categoría
         self.cb_categoria = QComboBox()
-        self.cb_categoria.addItems(["Consumibles", "Tintas", "Agujas", "EPP", "Limpieza", "Aftercare"])
-        form.addRow("Categoría:", wrap(self.cb_categoria))
+        self.cb_categoria.addItems(["Consumibles","Tintas", "Agujas", "EPP", "Limpieza", "Aftercare"])
+        self.cb_categoria.setMinimumHeight(36)
+        form.addRow("Categoría:", self.cb_categoria)
 
-        # Otra categoría
         self.in_categoria_extra = QLineEdit()
         self.in_categoria_extra.setPlaceholderText("Otra categoría (opcional)")
-        form.addRow("Otra categoría:", wrap(self.in_categoria_extra))
+        self.in_categoria_extra.setMinimumHeight(36)
+        form.addRow("Otra categoría:", self.in_categoria_extra)
 
-        # Unidad
         self.cb_unidad = QComboBox()
         self.cb_unidad.addItems(["pz", "ml", "par"])
-        form.addRow("Unidad:", wrap(self.cb_unidad))
+        self.cb_unidad.setMinimumHeight(36)
+        form.addRow("Unidad:", self.cb_unidad)
 
-        # Costo
         self.in_costo = QDoubleSpinBox()
-        self.in_costo.setRange(0, 1_000_000)
+        self.in_costo.setRange(0, 1000000)
         self.in_costo.setPrefix("$ ")
         self.in_costo.setDecimals(2)
-        form.addRow("Costo:", wrap(self.in_costo))
+        self.in_costo.setMinimumHeight(36)
+        form.addRow("Costo:", self.in_costo)
 
-        # Stock
         self.in_stock = QSpinBox()
-        self.in_stock.setRange(0, 1_000_000)
         self.in_stock.setValue(10)
-        form.addRow("Stock:", wrap(self.in_stock))
+        self.in_stock.setRange(0, 1000000)
+        self.in_stock.setMinimumHeight(36)
+        form.addRow("Stock:", self.in_stock)
 
-        # Mínimo stock
         self.in_min_stock = QSpinBox()
-        self.in_min_stock.setRange(0, 1_000_000)
         self.in_min_stock.setValue(5)
-        form.addRow("Mínimo stock:", wrap(self.in_min_stock))
+        self.in_min_stock.setRange(0, 1000000)
+        self.in_min_stock.setMinimumHeight(36)
+        form.addRow("Mínimo stock:", self.in_min_stock)
 
-        # Caduca
+        # Caduca con calendario
         self.chk_caduca = QCheckBox("¿Caduca?")
-        form.addRow("Caduca:", wrap(self.chk_caduca))
+        self.chk_caduca.setMinimumHeight(36)
+        form.addRow("Caduca:", self.chk_caduca)
+        self.chk_caduca.stateChanged.connect(self._show_calendar_if_checked)
 
-        # Proveedor
+        # Campo para fecha de caducidad
+        self.in_fechacaducidad = QLineEdit()
+        self.in_fechacaducidad.setReadOnly(True)
+        self.in_fechacaducidad.setPlaceholderText("Selecciona fecha si aplica")
+        self.in_fechacaducidad.setMinimumHeight(36)
+        form.addRow("Fecha caducidad:", self.in_fechacaducidad)
+
         self.in_proveedor = QLineEdit()
-        form.addRow("Proveedor:", wrap(self.in_proveedor))
+        self.in_proveedor.setMinimumHeight(36)
+        form.addRow("Proveedor:", self.in_proveedor)
 
-        # Activo
         self.chk_activo = QCheckBox("Activo")
         self.chk_activo.setChecked(True)
-        form.addRow("Estado:", wrap(self.chk_activo))
+        self.chk_activo.setMinimumHeight(36)
+        form.addRow("Estado:", self.chk_activo)
+
+        root.addLayout(form)
 
         # ---- Botones ----
         btn_bar = QHBoxLayout()
-        btn_bar.setSpacing(14)
         btn_bar.addStretch(1)
-        self.btn_cancelar = QPushButton("Cancelar"); self.btn_cancelar.setObjectName("Ghost")
-        self.btn_guardar  = QPushButton("Guardar");  self.btn_guardar.setObjectName("Primary")
-        self.btn_guardar.setDefault(True)
-        self.btn_cancelar.setAutoDefault(False)
-        btn_bar.addWidget(self.btn_cancelar)
+        self.btn_guardar = QPushButton("Guardar")
+        self.btn_cancelar = QPushButton("Cancelar")
+        for b in (self.btn_guardar, self.btn_cancelar):
+            b.setMinimumHeight(44)
+            b.setStyleSheet("font-size: 11pt; padding: 6px 14px;")
         btn_bar.addWidget(self.btn_guardar)
+        btn_bar.addWidget(self.btn_cancelar)
         root.addLayout(btn_bar)
 
-        # Acciones
         self.btn_guardar.clicked.connect(self._on_guardar)
         self.btn_cancelar.clicked.connect(self.close)
 
-        # Validación + SKU en tiempo real
         self._wire_min_validation()
         self._wire_sku_generation()
 
-        self.in_nombre.setFocus()
+    def _show_calendar_if_checked(self, state):
+        if state == Qt.Checked:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Selecciona fecha de caducidad")
+            dlg.setModal(True)
+            layout = QVBoxLayout(dlg)
+            calendar = QCalendarWidget()
+            calendar.setGridVisible(True)
+            layout.addWidget(calendar)
 
-        # Anchura flexible
-        for w in (
-            self.in_sku, self.in_nombre, self.cb_categoria, self.in_categoria_extra,
-            self.cb_unidad, self.in_costo, self.in_stock, self.in_min_stock,
-            self.in_proveedor
-        ):
-            w.setMinimumWidth(540)
-            w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            layout.addWidget(buttons)
 
-    # ---------- helpers ----------
-    def _generate_sku(self) -> str:
-        nombre = self.in_nombre.text().strip().upper()[:3] or "XXX"
-        categoria = (self.in_categoria_extra.text().strip() or self.cb_categoria.currentText()).upper()[:3] or "XXX"
-        rand = random.randint(100, 999)
-        return f"{nombre}-{categoria}-{rand}"
+            def aceptar():
+                fecha = calendar.selectedDate().toPyDate()
+                self.in_fechacaducidad.setText(fecha.isoformat())
+                dlg.accept()
+
+            def cancelar():
+                self.chk_caduca.setChecked(False)
+                dlg.reject()
+
+            buttons.accepted.connect(aceptar)
+            buttons.rejected.connect(cancelar)
+            dlg.exec_()
+        else:
+            self.in_fechacaducidad.clear()
 
     def _wire_min_validation(self):
+        """Validar campos obligatorios: nombre, categoría, unidad, costo"""
         def update_enabled():
-            ok = bool(self.in_nombre.text().strip())
+            ok =  bool(self.in_nombre.text().strip())  > 0   
+
             self.btn_guardar.setEnabled(ok)
 
             # resaltar inválidos
@@ -240,20 +161,23 @@ class NewItemPage(QWidget):
                 widget.setProperty("invalid", not condition)
                 widget.style().unpolish(widget)
                 widget.style().polish(widget)
-            mark(self.in_nombre, ok)
+            mark(self.in_nombre, bool(self.in_nombre.text().strip()))
+          
 
         self.in_nombre.textChanged.connect(update_enabled)
         update_enabled()
 
     def _wire_sku_generation(self):
         def update_sku():
-            self.in_sku.setText(self._generate_sku())
+            nombre = self.in_nombre.text().strip().upper()[:3] or "XXX"
+            categoria = (self.in_categoria_extra.text().strip() or self.cb_categoria.currentText()).upper()[:3] or "XXX"
+            rand = random.randint(100, 999)
+            self.in_sku.setText(f"{nombre}-{categoria}-{rand}")
         self.in_nombre.textChanged.connect(update_sku)
         self.in_categoria_extra.textChanged.connect(update_sku)
         self.cb_categoria.currentTextChanged.connect(update_sku)
         update_sku()
 
-    # ---------- guardar ----------
     def _on_guardar(self):
         if not self.btn_guardar.isEnabled():
             QMessageBox.warning(self, "Validación", "Completa los campos obligatorios.")
@@ -268,11 +192,50 @@ class NewItemPage(QWidget):
                 stock=int(self.in_stock.value()),
                 min_stock=int(self.in_min_stock.value()),
                 caduca=self.chk_caduca.isChecked(),
-                proveedor=self.in_proveedor.text().strip(),
+                provedor=self.in_proveedor.text().strip(),
                 activo=self.chk_activo.isChecked(),
+                fechacaducidad=self.in_fechacaducidad.text() or None
             )
             QMessageBox.information(self, "Éxito", f"✅ Producto '{producto.name}' creado con SKU: {producto.sku}")
-            self.item_creado.emit(producto.sku)  # notifica a MainWindow
+            self.item_creado.emit(producto.sku)
             self.close()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Ocurrió un error al guardar: {e}")
+
+def crear_producto(
+    sku: str,
+    name: str,
+    category: Optional[str],
+    unidad: str,
+    cost: float,
+    stock: int,
+    min_stock: int,
+    caduca: bool,
+    provedor: str,
+    activo: bool,
+    fechacaducidad: Optional[str] = None
+) -> Product:
+    session = SessionLocal()
+    try:
+        nuevo = Product(
+            sku=sku,
+            name=name,
+            category=category or "consumibles",
+            unidad=unidad,
+            cost=cost,
+            stock=stock,
+            min_stock=min_stock,
+            caduca=caduca,
+            provedor=provedor,
+            activo=activo,
+            fechacaducidad=fechacaducidad
+        )
+        session.add(nuevo)
+        session.commit()
+        session.refresh(nuevo)
+        return nuevo
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

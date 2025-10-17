@@ -25,7 +25,8 @@ from ui.pages import (
     InventoryDashboardPage, InventoryItemsPage, InventoryItemDetailPage, InventoryMovementsPage,
     AgendaPage
 )
-
+from data.models.product import Product
+#from ui.pages.nueva_entrada import EntradaProductoDialog
 try:
     from ui.pages.cash_register import CashRegisterDialog
 except Exception:
@@ -173,16 +174,18 @@ class MainWindow(QMainWindow):
         self.idx_inv_moves    = self.stack.addWidget(self.inventory_moves)
         self.inventory_dash.ir_items        = lambda: self._ir(self.idx_inv_items)
         self.inventory_dash.ir_movimientos  = lambda: self._ir(self.idx_inv_moves)
-        self.inventory_dash.nuevo_item      = self._abrir_popup_nuevo_item
         self.inventory_items.abrir_item     = lambda it: (self.inventory_detail.load_item(it), self._ir(self.idx_inv_detail))
+
+        self.inventory_dash.nuevo_item      = self._abrir_popup_nuevo_item
         self.inventory_items.nuevo_item     = self._abrir_popup_nuevo_item
-        self.inventory_items.nueva_entrada  = lambda it: self._ir(self.idx_inv_entry)
+        self.inventory_items.nueva_entrada = self._abrir_entrada_producto
+        #self.inventory_items.nueva_entrada  = lambda it: self._ir(self.idx_inv_entry)
         self.inventory_items.nuevo_ajuste   = lambda it: self._ir(self.idx_inv_adjust)
         self.inventory_detail.volver.connect(lambda: self._ir(self.idx_inv_items))
 
         # Placeholders de acciones inventario
         self.inventory_moves.volver.connect(lambda: self._ir(self.idx_inventory))
-        self.idx_inv_new_item = self.stack.addWidget(make_simple_page("Nuevo ítem"))
+        #self.idx_inv_new_item = self.stack.addWidget(make_simple_page("Nuevo ítem"))
         self.idx_inv_entry    = self.stack.addWidget(make_simple_page("Nueva entrada"))
         self.idx_inv_adjust   = self.stack.addWidget(make_simple_page("Ajuste de inventario"))
 
@@ -424,7 +427,7 @@ class MainWindow(QMainWindow):
             self.idx_inv_items: self.btn_forms,
             self.idx_inv_detail: self.btn_forms,
             self.idx_inv_moves: self.btn_forms,
-            self.idx_inv_new_item: self.btn_forms,
+           # self.idx_inv_new_item: self.btn_forms,
             self.idx_inv_entry: self.btn_forms,
             self.idx_inv_adjust: self.btn_forms,
         }
@@ -598,68 +601,52 @@ class MainWindow(QMainWindow):
             self.btn_user.setChecked(False)
         super().mousePressEvent(event)
     
-    def _on_item_creado(self, sku: str):
-    # Refrescar la lista de Inventario tras crear
-        try:
-            if hasattr(self.inventory_items, "reload_from_db_and_refresh"):
-                self.inventory_items.reload_from_db_and_refresh()
-            elif hasattr(self.inventory_items, "refresh"):
-                self.inventory_items.refresh()
-            elif hasattr(self.inventory_items, "_refresh"):
-                self.inventory_items._refresh()
-        except Exception:
-            pass
-        # Volvemos a la lista de items
-        self._ir(self.idx_inv_items)
+  
+    def _on_item_creado(self, sku):
+     print(f"✅ Nuevo ítem creado con SKU: {sku}")
+    # Aquí podrías recargar una tabla, refrescar datos, etc.
+   
+     self.inventory_items._seed_mock();
+     self.inventory_items._refresh()
+     self.inventory_dash.refrescar_datos();
 
     def _abrir_popup_nuevo_item(self):
-        # Popup frameless, translúcido y arrastrable
-        dlg = FramelessPopup(self)
-        dlg.setObjectName("NewItemDlg")
-        dlg.setModal(True)
-        dlg.setAttribute(Qt.WA_TranslucentBackground, True)   # ← SIN cuadro exterior
-        dlg.resize(860, 720)
+    # Crear diálogo modal
+     dialog = QDialog(self)
+     dialog.setWindowTitle("Nuevo item")
+     dialog.setModal(True)  # bloquea la ventana principal
 
-        outer = QVBoxLayout(dlg)
-        outer.setContentsMargins(0, 0, 0, 0)  # sin margen para que no se vea un fondo cuadrado
-        outer.setSpacing(0)
+    # Agregar el formulario dentro del diálogo
+     layout = QVBoxLayout(dialog)
+     form = NewItemPage()
+     layout.addWidget(form)
+     form.item_creado.connect(self._on_item_creado)
+    # Cuando se cierre el formulario (por el botón "Cancelar" o al guardar)
+    # cerramos también el QDialog
+     form.btn_guardar.clicked.connect(dialog.accept)
+     form.btn_cancelar.clicked.connect(dialog.reject)
+     
+    # Mostrar el popup
+     dialog.exec_()
 
-        panel = QFrame(dlg)
-        panel.setObjectName("PopupPanel")
-        outer.addWidget(panel)
+    def _abrir_entrada_producto(self, item_dict):
+      """
+      Abre el diálogo de entrada de producto como un popup modal
+      y actualiza la tabla cuando se guarda.
+       """
+    # Convertir el diccionario en objeto Product temporal
+      producto = Product(
+        sku=item_dict["sku"],
+        name=item_dict["nombre"],
+        category=item_dict["categoria"],
+        unidad=item_dict["unidad"],
+        stock=item_dict["stock"],
+        min_stock=item_dict["minimo"],
+        caduca=item_dict["caduca"],
+        provedor=item_dict["proveedor"],
+        activo=item_dict["activo"]
+    )
 
-        panel_lay = QVBoxLayout(panel)
-        panel_lay.setContentsMargins(24, 24, 24, 24)
-        panel_lay.setSpacing(0)
-
-        form = NewItemPage(panel)
-        panel_lay.addWidget(form)
-
-        # Estilos: dialogo transparente, panel redondeado
-        dlg.setStyleSheet("""
-        #NewItemDlg { background: transparent; }
-        #PopupPanel {
-            background: #2A2F34;
-            border: 1px solid rgba(255,255,255,0.14);
-            border-radius: 16px;
-        }
-        """)
-        # Si usas sombra:
-        from PyQt5.QtWidgets import QGraphicsDropShadowEffect
-        from PyQt5.QtGui import QColor
-        shadow = QGraphicsDropShadowEffect(dlg)
-        shadow.setBlurRadius(32)
-        shadow.setXOffset(0)
-        shadow.setYOffset(8)
-        shadow.setColor(QColor(0, 0, 0, 120))
-        panel.setGraphicsEffect(shadow)
-
-        # Señales (igual que antes)
-        try: form.item_creado.connect(self._on_item_creado)
-        except: pass
-        try: form.btn_guardar.clicked.connect(dlg.accept)
-        except: pass
-        try: form.btn_cancelar.clicked.connect(dlg.reject)
-        except: pass
-
-        dlg.exec_()
+      dialog = EntradaProductoDialog(producto)
+     # dialog.entrada_creada.connect(self._on_entrada_creada)
+      dialog.exec_()

@@ -3,7 +3,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
-    QPushButton, QTableWidget, QTableWidgetItem, QFrame, QSizePolicy, QSpacerItem,QMessageBox
+    QPushButton, QTableWidget, QTableWidgetItem, QFrame, QSizePolicy, QSpacerItem, QMessageBox
 )
 from sqlalchemy.orm import Session
 
@@ -30,7 +30,7 @@ class InventoryItemsPage(QWidget):
         # Callbacks que MainWindow reemplaza
         self.abrir_item = lambda item: None
         self.nuevo_item = lambda: None
-        self.nueva_entrada = lambda item: None
+        self.nueva_entrada = lambda: None
         self.nuevo_ajuste = lambda item: None
 
         # Estado de filtros/paginación
@@ -141,7 +141,7 @@ class InventoryItemsPage(QWidget):
                         p.stock,
                         p.min_stock,
                         p.caduca,
-                        p.proveedor,
+                        p.provedor,
                         p.activo
                     ))
         except Exception as ex:
