@@ -60,8 +60,8 @@ class NewItemPage(QWidget):
         super().__init__(parent)
 
         self.setWindowTitle("Nuevo ítem")
-        self.setMinimumWidth(640)
-        self.setMinimumHeight(640)
+        self.setMinimumWidth(800)
+        self.setMinimumHeight(1000)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.setObjectName("NewItemPage")
 
@@ -280,7 +280,18 @@ class NewItemPage(QWidget):
                 activo=self.chk_activo.isChecked(),
                 fechacaducidad=self.in_fechacaducidad.text() or None  # <- opcional
             )
-            QMessageBox.information(self, "Éxito", f"✅ Producto '{producto.name}' creado con SKU: {producto.sku}")
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Éxito")
+            msg.setText("✅ Item creado con exito")
+            
+
+             # Aplicar QSS para colores
+            msg.setStyleSheet("""
+            QLabel { color: #000000; font-size: 12pt; }
+            QPushButton { background: #3B82F6; color: white; border-radius: 6px; padding: 4px 12px; }
+            QPushButton:hover { background: #2563EB; }
+           """)
+            msg.exec_()
             self.item_creado.emit(producto.sku)
             self.close()
         except Exception as e:

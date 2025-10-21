@@ -517,33 +517,17 @@ class MainWindow(QMainWindow):
 
     # ====== Inventario: popup y refrescos ======
     def _on_item_creado(self, sku: str):
-        """Refresca Inventario tras crear un ítem."""
-        try:
-            if hasattr(self.inventory_items, "reload_from_db_and_refresh"):
-                self.inventory_items.reload_from_db_and_refresh()
-            elif hasattr(self.inventory_items, "refresh"):
-                self.inventory_items.refresh()
-            elif hasattr(self.inventory_items, "_refresh"):
-                self.inventory_items._refresh()
-        except Exception:
-            pass
-
-        # Dashboard (si expone refresco)
-        try:
-            if hasattr(self.inventory_dash, "refrescar_datos"):
-                self.inventory_dash.refrescar_datos()
-        except Exception:
-            pass
-
-        # Vuelve a la lista de ítems
-        self._ir(self.idx_inv_items)
+        print(f"Producto creado")  
+        self.inventory_items._seed_mock()
+        self.inventory_items._refresh() 
+        self.inventory_dash.refrescar_datos()# <- actualizar KPIs
 
     def _abrir_popup_nuevo_item(self):
-        """Popup frameless, translúcido y arrastrable para 'Nuevo ítem'."""
+         # Crear instancia de NewItemPage
         dlg = FramelessPopup(self)
         dlg.setObjectName("NewItemDlg")
         dlg.setModal(True)
-        dlg.setAttribute(Qt.WA_TranslucentBackground, True)
+
         dlg.resize(860, 720)
 
         outer = QVBL(dlg)
