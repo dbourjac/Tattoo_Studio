@@ -1,4 +1,3 @@
-# ui/pages/inventory_items.py
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
@@ -141,7 +140,7 @@ class InventoryItemsPage(QWidget):
                         p.stock,
                         p.min_stock,
                         p.caduca,
-                        p.provedor,
+                        p.proveedor,
                         p.activo
                     ))
         except Exception as ex:

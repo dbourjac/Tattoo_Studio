@@ -16,6 +16,7 @@ class Client(Base):
     phone = Column(String(40))
     email = Column(String(120))
     notes = Column(Text)
+    is_active = Column(Boolean, nullable=False, server_default="1")
 
     created_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 

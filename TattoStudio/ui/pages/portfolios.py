@@ -273,6 +273,20 @@ class PortfolioService:
             except Exception:
                 pass
             return {"item": it, "artist": artist, "session": session, "client": client, "transaction": tx}
+        
+    @staticmethod
+    def portfolio_for_client(client_id: int, limit=200, offset=0):
+        """Trae piezas (PortfolioItem) vinculadas a un cliente específico."""
+        from data.db.session import SessionLocal
+        with SessionLocal() as db:
+            return (
+                db.query(PortfolioItem)
+                  .filter(PortfolioItem.client_id == client_id)
+                  .order_by(PortfolioItem.created_at.desc(), PortfolioItem.id.desc())
+                  .limit(limit)
+                  .offset(offset)
+                  .all()
+            )
 
 # ----------------------------------------------------------------------
 # Tarjeta de pieza (thumbnail + overlay simple)

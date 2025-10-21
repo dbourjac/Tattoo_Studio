@@ -3,18 +3,28 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QSizePolicy, QSpacerItem, QListWidget, QListWidgetItem
 )
+from datetime import date, timedelta, datetime
+
 from data.db.session import SessionLocal
 from data.models.product import Product
-from datetime import date, timedelta, datetime
 
 
 class InventoryDashboardPage(QWidget):
+    """
+    Dashboard de Inventario
+    - KPIs: Ítems activos, Bajo stock, Por caducar, Consumo (mes)
+    - Accesos rápidos: Nuevo ítem / Ver ítems / Movimientos
+    - Listas: Bajo stock y Por caducar (≤30 días)
+    Señales (callables que MainWindow debe asignar):
+      ir_items, ir_movimientos, nuevo_item
+    """
     ir_items = None
     ir_movimientos = None
     nuevo_item = None
 
     def __init__(self):
         super().__init__()
+        # Señales simples por atributo (MainWindow las conecta)
         self.ir_items = lambda: None
         self.ir_movimientos = lambda: None
         self.nuevo_item = lambda: None
@@ -35,7 +45,7 @@ class InventoryDashboardPage(QWidget):
         self.kpi_layout.setSpacing(12)
         root.addLayout(self.kpi_layout)
 
-        # Guardamos referencias para actualizarlas después
+        # Guardamos referencias para actualizarlas
         self.lbl_activos = self._kpi("Ítems activos", "0")
         self.lbl_bajo_stock = self._kpi("Bajo stock", "0")
         self.lbl_por_caducar = self._kpi("Por caducar", "0")
@@ -89,10 +99,10 @@ class InventoryDashboardPage(QWidget):
 
         root.addLayout(alerts_box)
 
-        # 🔹 Llamar a refrescar datos al iniciar
+        # Al iniciar, refrescamos
         self.refrescar_datos()
 
-    # ---------- helpers ----------
+    # ---------- UI helpers ----------
     def _kpi(self, title: str, value: str) -> QFrame:
         card = QFrame()
         card.setObjectName("CardKPI")
@@ -110,7 +120,8 @@ class InventoryDashboardPage(QWidget):
         lay.addWidget(t)
         lay.addWidget(v)
 
-        card.value_label = v  # Guardamos referencia al QLabel de valor
+        # guardamos el label de valor para actualizarlo
+        card.value_label = v
         return card
 
     def _card(self, title: str) -> QFrame:
@@ -138,45 +149,58 @@ class InventoryDashboardPage(QWidget):
         )
         return lst
 
-    # ---------- nueva función ----------
+    # ---------- Datos ----------
     def refrescar_datos(self):
-        """Actualiza KPIs y listas desde la base de datos."""
+        """Consulta la BD y actualiza KPIs + listas. Tolera ausencia de 'fechacaducidad'."""
         session = SessionLocal()
         try:
-            # 🔹 Ítems activos
+            # Ítems activos
             activos = session.query(Product).filter(Product.activo == True).count()
 
-            # 🔹 Bajo stock
+            # Bajo stock (solo activos)
             bajo_stock = session.query(Product).filter(
-                Product.activo == True, Product.stock < Product.min_stock
+                Product.activo == True,
+                Product.stock < Product.min_stock
             ).count()
 
-            # 🔹 Por caducar
+            # Por caducar (≤30 días) — solo si el modelo/tabla trae 'fechacaducidad'
             fecha_limite = date.today() + timedelta(days=30)
-            productos_caducables = session.query(Product).filter(Product.caduca == True).all()
-            por_caducar = [
-                p for p in productos_caducables
-                if p.fechacaducidad and self._esta_por_caducar(p.fechacaducidad, fecha_limite)
-            ]
+            por_caducar_list = []
+            try:
+                productos_caducables = session.query(Product).filter(Product.caduca == True).all()
+                for p in productos_caducables:
+                    fc = getattr(p, "fechacaducidad", None)
+                    if fc and self._esta_por_caducar(fc, fecha_limite):
+                        por_caducar_list.append((p.name, fc))
+            except Exception:
+                # Si no existe la columna o hay error de parseo, dejamos lista vacía
+                por_caducar_list = []
 
-            # 🔹 Consumo (mes) → puedes reemplazarlo con una consulta real si tienes tabla de movimientos
-            consumo_mes = 0  
+            # Consumo (mes) — placeholder hasta que tengamos movimientos
+            consumo_mes = 0
 
-            # 🔹 Actualizar KPIs
+            # KPIs
             self.lbl_activos.value_label.setText(str(activos))
             self.lbl_bajo_stock.value_label.setText(str(bajo_stock))
-            self.lbl_por_caducar.value_label.setText(str(len(por_caducar)))
+            self.lbl_por_caducar.value_label.setText(str(len(por_caducar_list)))
             self.lbl_consumo.value_label.setText(f"${consumo_mes:,}")
 
-            # 🔹 Actualizar listas
+            # Listas
             self.low_list.clear()
-            for p in session.query(Product).filter(Product.stock < Product.min_stock, Product.activo == True).all():
+            for p in session.query(Product).filter(
+                Product.activo == True,
+                Product.stock < Product.min_stock
+            ).order_by(Product.stock.asc()).all():
                 QListWidgetItem(f"{p.name} (stock: {p.stock}/{p.min_stock})", self.low_list)
 
             self.exp_list.clear()
-            for p in por_caducar:
-                fecha = datetime.strptime(p.fechacaducidad, "%Y-%m-%d").date()
-                QListWidgetItem(f"{p.name} — {fecha.strftime('%d/%m/%Y')}", self.exp_list)
+            for name, fecha_str in sorted(por_caducar_list, key=lambda x: x[1]):
+                try:
+                    fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+                    text = f"{name} — {fecha.strftime('%d/%m/%Y')}"
+                except Exception:
+                    text = f"{name} — {fecha_str}"
+                QListWidgetItem(text, self.exp_list)
 
         except Exception as e:
             print(f"⚠️ Error al refrescar datos del inventario: {e}")
@@ -184,9 +208,9 @@ class InventoryDashboardPage(QWidget):
             session.close()
 
     def _esta_por_caducar(self, fecha_str, fecha_limite):
-        """Convierte el string y verifica si está dentro del rango."""
+        """Devuelve True si fecha_str (YYYY-MM-DD) es <= fecha_limite."""
         try:
             fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
             return fecha <= fecha_limite
-        except ValueError:
+        except Exception:
             return False

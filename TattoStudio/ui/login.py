@@ -23,7 +23,7 @@ class LoginDialog(QDialog):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("TattooStudio — Inicio de sesión")
+        self.setWindowTitle("InkLink OS — Inicio de sesión")
         self.setMinimumSize(420, 280)
         self.setModal(True)
 
@@ -34,7 +34,7 @@ class LoginDialog(QDialog):
         root.setContentsMargins(32, 32, 32, 32)
         root.setSpacing(16)
 
-        title = QLabel("Bienvenido a TattooStudio")
+        title = QLabel("Bienvenido a InkLink OS")
         title.setObjectName("H1")
         title.setAlignment(Qt.AlignCenter)
         root.addWidget(title)

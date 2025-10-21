@@ -38,6 +38,12 @@ from ui.pages.common import (
     save_artist_color,        # guarda/actualiza color por artista
     fallback_color_for,       # color de respaldo estable
 )
+from ui.pages.portfolios import (
+    FlowLayout,               # grid fluido reutilizable
+    PortfolioCard,            # card reutilizable
+    PortfolioDetailDialog,    # diálogo emergente de detalle
+    PortfolioService,         # capa de datos/consultas
+)
 
 # ===== QLineEdit con menú contextual en español (se conserva aquí)
 class LocalizedLineEdit(QLineEdit):
@@ -122,6 +128,8 @@ class StaffDetailPage(QWidget):
         self._current_is_active: bool = True
         self._kebab_allowed: bool = False
         self._block_status_tips: bool = False  # safety extra
+        self._current_artist_id: Optional[int] = None  # para refrescar Portafolio por staff
+
 
         # ===== LAYOUT PRINCIPAL
         root = QHBoxLayout(self); root.setContentsMargins(24, 24, 24, 24); root.setSpacing(16)
@@ -275,7 +283,7 @@ class StaffDetailPage(QWidget):
         # --------- Derecha: Tabs
         right_wrap = QFrame(); right = QVBoxLayout(right_wrap); right.setContentsMargins(0, 0, 0, 0); right.setSpacing(8)
         self.tabs = QTabWidget(); right.addWidget(self.tabs, stretch=1)
-        self.tab_port = QWidget(); self._mk_list(self.tab_port, [])
+        self.tab_port = QWidget(); self._mk_staff_gallery(self.tab_port)
         self.tab_citas = QWidget(); self._mk_citas_tab(self.tab_citas)
         self.tab_docs = QWidget(); self._mk_text(self.tab_docs, "Documentos (placeholder)")
         self.tabs.addTab(self.tab_port, "Portafolio"); self.tabs.addTab(self.tab_citas, "Citas"); self.tabs.addTab(self.tab_docs, "Documentos")
@@ -304,6 +312,65 @@ class StaffDetailPage(QWidget):
         outer = QVBoxLayout(w); card = QFrame(); card.setObjectName("Card")
         lay = QVBoxLayout(card); lay.setContentsMargins(12, 12, 12, 12)
         self.lst_citas = QListWidget(); lay.addWidget(self.lst_citas); outer.addWidget(card)
+    # --------------------------------------------------------
+    # Galería del STAFF (reusa componentes de portfolios.py)
+    # --------------------------------------------------------
+    def _mk_staff_gallery(self, w: QWidget):
+        outer = QVBoxLayout(w)
+        card = QFrame(); card.setObjectName("Card")
+        lay = QVBoxLayout(card); lay.setContentsMargins(12, 12, 12, 12); lay.setSpacing(8)
+
+        # Scroll + FlowLayout
+        from PyQt5.QtWidgets import QScrollArea
+        self._port_scroll = QScrollArea(card); self._port_scroll.setWidgetResizable(True)
+        self._port_host = QWidget(self._port_scroll)
+        self._port_flow = FlowLayout(self._port_host, hspacing=12, vspacing=12)
+        self._port_host.setLayout(self._port_flow)
+        self._port_scroll.setWidget(self._port_host)
+        lay.addWidget(self._port_scroll)
+
+        outer.addWidget(card)
+
+    def _clear_staff_gallery(self):
+        while self._port_flow.count():
+            it = self._port_flow.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+
+    def _refresh_staff_gallery(self, user_id: Optional[int]):
+        self._clear_staff_gallery()
+        if not user_id:
+            msg = QLabel("Selecciona/guarda un usuario para ver su portafolio.")
+            msg.setStyleSheet("color:#99A;")
+            self._port_flow.addWidget(msg)
+            return
+
+        try:
+            artist_id = getattr(self, "_current_artist_id", None)
+            items = PortfolioService.portfolio_for_user(int(user_id), artist_id, limit=200, offset=0)
+        except Exception as ex:
+            err = QLabel(f"Error al cargar portafolio: {ex}")
+            err.setStyleSheet("color:#E99;")
+            self._port_flow.addWidget(err)
+            return
+
+        if not items:
+            emp = QLabel("Este miembro del staff aún no tiene piezas en portafolio.")
+            emp.setStyleSheet("color:#99A;")
+            self._port_flow.addWidget(emp)
+            return
+
+        for it in items:
+            card = PortfolioCard(it, on_click=self._open_portfolio_detail, parent=self._port_host)
+            self._port_flow.addWidget(card)
+
+    def _open_portfolio_detail(self, item):
+        payload = PortfolioService.item_detail(int(item.id)) or {
+            "item": item, "artist": None, "session": None, "client": None, "transaction": None
+        }
+        dlg = PortfolioDetailDialog(payload, self)
+        dlg.show_at_cursor()
 
     # ===== Avatars
     def _project_root(self) -> Path:
@@ -409,6 +476,7 @@ class StaffDetailPage(QWidget):
             if not u:
                 self.lbl_name.setText(staff.get("nombre", "—")); self._apply_rbac(view_only=True); return
             self._paint_from_user(db, u); self._load_appointments(db, u)
+            self._refresh_staff_gallery(self._user_id)
         self._apply_rbac(view_only=True)
 
     def start_create_mode(self):
@@ -421,6 +489,8 @@ class StaffDetailPage(QWidget):
         self.avatar.setPixmap(self._make_avatar_pixmap(128, visible_name))
         self._current_is_active = True
         self._toggle_edit_widgets(True); self._apply_rbac(view_only=False)
+        self._current_artist_id = None
+        self._refresh_staff_gallery(None)
 
     # ===== Render
     def _paint_from_user(self, db: Session, u: User):
@@ -429,6 +499,8 @@ class StaffDetailPage(QWidget):
             a = db.query(Artist).get(u.artist_id); artist_name = a.name if a else None
 
         self._current_is_active = bool(u.is_active)
+        # Guardamos artist_id actual (si aplica) para consultas de portafolio
+        self._current_artist_id = int(u.artist_id) if getattr(u, "artist_id", None) else None
         self._apply_artist_color(u.artist_id if u.role == "artist" else None)
 
         visible = artist_name if artist_name else (u.username or u.name or "—")
@@ -497,6 +569,7 @@ class StaffDetailPage(QWidget):
         with SessionLocal() as db:
             u = db.query(User).get(self._user_id)
             if u: self._paint_from_user(db, u); self._load_appointments(db, u)
+            self._refresh_staff_gallery(self._user_id)
         self._toggle_edit_widgets(False)
 
     # ===== Instagram helpers
@@ -609,6 +682,7 @@ class StaffDetailPage(QWidget):
 
                 u = db.query(User).get(self._user_id)
                 self._paint_from_user(db, u); self._load_appointments(db, u)
+                self._refresh_staff_gallery(self._user_id)
                 self._toggle_edit_widgets(False)
                 self._toast("Staff", "Cambios guardados.")
             except IntegrityError:
@@ -639,6 +713,7 @@ class StaffDetailPage(QWidget):
             self._current_is_active = bool(u.is_active)
             self._apply_artist_color(u.artist_id if u.role == "artist" else None)
             self._paint_from_user(db, u); self._load_appointments(db, u)
+            self._refresh_staff_gallery(self._user_id)
         self.staff_saved.emit()
 
     # ===== Foto / Contraseña / Color

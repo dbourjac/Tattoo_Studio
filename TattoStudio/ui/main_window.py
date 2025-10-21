@@ -5,7 +5,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton,
-    QFrame, QStatusBar, QStackedWidget, QSizePolicy, QDialog
+    QFrame, QStatusBar, QStackedWidget, QSizePolicy, QDialog, QVBoxLayout as QVBL
 )
 
 from ui.widgets.user_panel import PanelUsuario
@@ -16,6 +16,8 @@ from ui.pages.common import FramelessPopup
 # Login / sesión actual
 from services.contracts import set_current_user, get_current_user
 from ui.login import LoginDialog
+
+# Portafolios
 from ui.pages.portfolios import PortfoliosPage
 
 # Páginas exportadas por ui/pages/__init__.py
@@ -25,13 +27,12 @@ from ui.pages import (
     InventoryDashboardPage, InventoryItemsPage, InventoryItemDetailPage, InventoryMovementsPage,
     AgendaPage
 )
-from data.models.product import Product
-#from ui.pages.nueva_entrada import EntradaProductoDialog
+
+# Caja (opcional)
 try:
     from ui.pages.cash_register import CashRegisterDialog
 except Exception:
-    CashRegisterDialog = None  # fallback seguro si aún no existe/compila
-
+    CashRegisterDialog = None  # fallback si aún no existe
 
 SETTINGS = Path(__file__).parents[1] / "settings.json"
 
@@ -47,7 +48,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("TattooStudio")
+        self.setWindowTitle("InkLink OS")
         self.setMinimumSize(1200, 720)
 
         # =========================
@@ -65,11 +66,11 @@ class MainWindow(QMainWindow):
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.setSpacing(8)
 
-        self.brand_logo = QLabel()                 # logo de topbar
+        self.brand_logo = QLabel()
         self.brand_logo.setObjectName("BrandLogo")
-        self._set_brand_logo(28)                   # altura estándar 28 px
+        self._set_brand_logo(28)
 
-        brand = QLabel("TattooStudio")
+        brand = QLabel("InkLink OS")
         brand.setObjectName("Brand")
 
         left_lay.addWidget(self.brand_logo, 0, Qt.AlignVCenter)
@@ -77,7 +78,7 @@ class MainWindow(QMainWindow):
         left_lay.addStretch(1)
         tb.addWidget(left, stretch=1)
 
-        # ----- CENTRO: navegación (centrada geométricamente) -----
+        # ----- CENTRO: navegación (centrada) -----
         nav_box = QWidget()
         nav = QHBoxLayout(nav_box)
         nav.setContentsMargins(0, 0, 0, 0)
@@ -94,7 +95,6 @@ class MainWindow(QMainWindow):
                   self.btn_staff, self.btn_reports, self.btn_forms):
             nav.addWidget(b)
 
-        # El centro NO se estira: mide lo que ocupan los botones → queda centrado
         nav_box.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         tb.addWidget(nav_box, stretch=0, alignment=Qt.AlignCenter)
 
@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
         self.user_panel = PanelUsuario(self)
         self.user_panel.cambiar_usuario.connect(self.solicitar_switch_user.emit)
         self.user_panel.cambiar_tema.connect(self._on_toggle_theme)
-        self.solicitar_switch_user.connect(self._switch_user)  # ← cambio de usuario
+        self.solicitar_switch_user.connect(self._switch_user)
 
         # =========================
         #  Stack de páginas
@@ -127,10 +127,10 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
 
         # Portada
-        self.studio_page = StudioPage(studio_name="TattooStudio")
-        self.stack.addWidget(self.studio_page)                 # idx 0
+        self.studio_page = StudioPage(studio_name="InkLink OS")
+        self.stack.addWidget(self.studio_page)  # idx 0
 
-        # Agenda real
+        # Agenda
         self.agenda_page = AgendaPage()
         self.idx_agenda  = self.stack.addWidget(self.agenda_page)
 
@@ -139,23 +139,22 @@ class MainWindow(QMainWindow):
         self.idx_clientes    = self.stack.addWidget(self.clients_page)
         self.client_detail   = ClientDetailPage()
         self.idx_cliente_det = self.stack.addWidget(self.client_detail)
-
-        # Señales: volver y refrescar tras cambios (guardar/archivar/eliminar)
         self.client_detail.back_to_list.connect(self._show_clients_and_refresh)
         self.client_detail.cliente_cambiado.connect(self._refresh_clients_table)
+
+        # Señales clientes
+        self.clients_page.crear_cliente.connect(self._abrir_nuevo_cliente_popup)
+        self.clients_page.abrir_cliente.connect(self._open_client_detail)
 
         # Staff
         self.staff_page     = StaffPage()
         self.idx_staff      = self.stack.addWidget(self.staff_page)
         self.staff_detail   = StaffDetailPage()
         self.idx_staff_det  = self.stack.addWidget(self.staff_detail)
-        self.idx_staff_new  = self.stack.addWidget(make_simple_page("Nuevo staff"))  # (placeholder opcional)
+        self.idx_staff_new  = self.stack.addWidget(make_simple_page("Nuevo staff"))  # placeholder
 
-        # Abrir ficha (ver/editar) y alta en modo "nuevo"
         self.staff_page.agregar_staff.connect(self._open_staff_create)
         self.staff_page.abrir_staff.connect(self._open_staff_detail)
-
-        # Navegación y refrescos tras acciones
         self.staff_detail.back_requested.connect(self._back_to_staff_list)
         self.staff_detail.staff_saved.connect(self._refresh_staff_list)
 
@@ -172,44 +171,39 @@ class MainWindow(QMainWindow):
         self.idx_inv_detail   = self.stack.addWidget(self.inventory_detail)
         self.inventory_moves  = InventoryMovementsPage()
         self.idx_inv_moves    = self.stack.addWidget(self.inventory_moves)
+
+        # Wiring Inventario
         self.inventory_dash.ir_items        = lambda: self._ir(self.idx_inv_items)
         self.inventory_dash.ir_movimientos  = lambda: self._ir(self.idx_inv_moves)
-        self.inventory_items.abrir_item     = lambda it: (self.inventory_detail.load_item(it), self._ir(self.idx_inv_detail))
-
         self.inventory_dash.nuevo_item      = self._abrir_popup_nuevo_item
-        self.inventory_items.nuevo_item     = self._abrir_popup_nuevo_item
-        self.inventory_items.nueva_entrada = self._abrir_entrada_producto
-        #self.inventory_items.nueva_entrada  = lambda it: self._ir(self.idx_inv_entry)
-        self.inventory_items.nuevo_ajuste   = lambda it: self._ir(self.idx_inv_adjust)
-        self.inventory_detail.volver.connect(lambda: self._ir(self.idx_inv_items))
 
-        # Placeholders de acciones inventario
-        self.inventory_moves.volver.connect(lambda: self._ir(self.idx_inventory))
-        #self.idx_inv_new_item = self.stack.addWidget(make_simple_page("Nuevo ítem"))
+        self.inventory_items.abrir_item     = lambda it: (self.inventory_detail.load_item(it),
+                                                          self._ir(self.idx_inv_detail))
+        self.inventory_items.nuevo_item     = self._abrir_popup_nuevo_item
+        # Placeholders hasta que existan diálogos reales:
         self.idx_inv_entry    = self.stack.addWidget(make_simple_page("Nueva entrada"))
         self.idx_inv_adjust   = self.stack.addWidget(make_simple_page("Ajuste de inventario"))
+        self.inventory_items.nueva_entrada  = lambda it: self._ir(self.idx_inv_entry)
+        self.inventory_items.nuevo_ajuste   = lambda it: self._ir(self.idx_inv_adjust)
 
-        # Nuevo cliente (existe en stack pero se usa como POPUP)
+        self.inventory_detail.volver.connect(lambda: self._ir(self.idx_inv_items))
+        self.inventory_moves.volver.connect(lambda: self._ir(self.idx_inventory))
+
+        # Nuevo cliente (en popup)
         self.new_client_page = NewClientPage()
         self.idx_nuevo_cliente = self.stack.addWidget(self.new_client_page)
         self.new_client_page.volver_atras.connect(lambda: self._ir(self.idx_clientes))
+
+        # Portafolios (página real)
+        self.portfolios_page = PortfoliosPage()
+        self.idx_portafolios = self.stack.addWidget(self.portfolios_page)
+        if hasattr(self.studio_page, "ir_portafolios"):
+            self.studio_page.ir_portafolios.connect(lambda: self._ir(self.idx_portafolios))
 
         # ----- Wiring desde portada (CTAs) -----
         self.studio_page.ir_nueva_cita.connect(lambda: self._ir(self.idx_agenda))
         self.studio_page.ir_nuevo_cliente.connect(self._abrir_nuevo_cliente_popup)
         self.studio_page.ir_caja.connect(self._open_cash_dialog)
-
-        # Portafolios (página real)
-        self.portfolios_page = PortfoliosPage()
-        self.idx_portafolios = self.stack.addWidget(self.portfolios_page)
-
-        # Si tu portada emite esta señal, enlázala (si no existe, no revienta)
-        if hasattr(self.studio_page, "ir_portafolios"):
-            self.studio_page.ir_portafolios.connect(lambda: self._ir(self.idx_portafolios))
-
-        # Clients wiring
-        self.clients_page.crear_cliente.connect(self._abrir_nuevo_cliente_popup)
-        self.clients_page.abrir_cliente.connect(self._open_client_detail)
 
         # =========================
         #  Topbar → navegación
@@ -227,7 +221,7 @@ class MainWindow(QMainWindow):
         # =========================
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage("Ver. 0.1.9 | Último respaldo —")
+        status.showMessage("Ver. 0.2.0 | Último respaldo —")
 
         # =========================
         #  Layout raíz
@@ -239,7 +233,7 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.stack, stretch=1)
         self.setCentralWidget(root)
 
-        # Sincroniza el toggle del tema con lo persistido
+        # Tema persistido
         try:
             mode = json.loads(SETTINGS.read_text(encoding="utf-8")).get("theme", "light")
             self.user_panel.chk_dark.setChecked(mode == "dark")
@@ -270,10 +264,7 @@ class MainWindow(QMainWindow):
     #  Helpers de marca/tema
     # =========================
     def _set_brand_logo(self, height_px: int = 28) -> None:
-        """
-        Carga assets/logo.png y lo escala a 'height_px' manteniendo proporción.
-        Si no existe, deja un espacio reservado para que no “salte” la UI.
-        """
+        """Carga assets/logo.png y lo escala a 'height_px' manteniendo proporción."""
         logo_path = Path(__file__).parents[1] / "assets" / "logo.png"
         if logo_path.exists():
             pm = QPixmap(str(logo_path)).scaledToHeight(height_px, Qt.SmoothTransformation)
@@ -307,43 +298,51 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "idx_cash"):
             self.idx_cash = self.stack.addWidget(make_simple_page("Caja rápida"))
         return self.idx_cash
+    
+    def _open_client_detail(self, client: dict) -> None:
+        self.client_detail.load_client(client)
+        self._ir(self.idx_cliente_det)
 
     # ---------- RBAC ----------
     def _allowed_indices_for_role(self):
         """
         Devuelve el conjunto de índices de la stack permitidos para el rol actual.
-        Reglas mínimas:
           - admin: todo
-          - assistant: Estudio, Agenda, Clientes (y subpáginas), Reportes
-          - artist: Estudio, Agenda, Reportes + Clientes (vista/detalle)
+          - assistant: Estudio, Agenda, Clientes (y subpáginas), Reportes, Staff (ver/detalle)
+          - artist: Estudio, Agenda, Reportes, Clientes (ver/detalle), Staff (ver/detalle)
         """
         u = get_current_user() or {}
         role = u.get("role", "admin")
         allowed = {0, self.idx_agenda, self.idx_reportes}
 
         if role == "admin":
-            # Todo lo que existe
             allowed |= {
                 self.idx_clientes, self.idx_cliente_det, self.idx_nuevo_cliente,
                 self.idx_staff, self.idx_staff_det, self.idx_staff_new,
                 self.idx_inventory, self.idx_inv_items, self.idx_inv_detail,
-                self.idx_inv_moves, self.idx_inv_new_item, self.idx_inv_entry, self.idx_inv_adjust,
+                self.idx_inv_moves, self.idx_inv_entry, self.idx_inv_adjust,
             }
             if hasattr(self, "idx_cash"): allowed.add(self.idx_cash)
             if hasattr(self, "idx_portafolios"): allowed.add(self.idx_portafolios)
+
         elif role == "assistant":
-            allowed |= {self.idx_clientes, self.idx_cliente_det, self.idx_nuevo_cliente}
+            allowed |= {
+                self.idx_clientes, self.idx_cliente_det, self.idx_nuevo_cliente,
+                self.idx_staff, self.idx_staff_det,
+            }
+            if hasattr(self, "idx_portafolios"): allowed.add(self.idx_portafolios)
+
         elif role == "artist":
-            # Acceso de lectura a Clientes (lista + detalle)
-            allowed |= {self.idx_clientes, self.idx_cliente_det}
-            # (El popup de “Nuevo Cliente” se maneja fuera del stack.)
+            allowed |= {
+                self.idx_clientes, self.idx_cliente_det,
+                self.idx_staff, self.idx_staff_det,
+            }
+            if hasattr(self, "idx_portafolios"): allowed.add(self.idx_portafolios)
 
         return allowed
 
     def _apply_role_gates(self):
-        """
-        Oculta/mostrar navegación principal según rol y fija páginas permitidas.
-        """
+        """Oculta/mostrar navegación principal según rol y fija páginas permitidas."""
         u = get_current_user() or {}
         role = u.get("role", "admin")
 
@@ -352,42 +351,8 @@ class MainWindow(QMainWindow):
         self.btn_staff.setVisible(role in ("admin", "assistant", "artist"))
         self.btn_forms.setVisible(role == "admin")  # Inventario solo admin
 
-        # Guardamos el set de páginas permitidas para validarlo en _ir
-        def _allowed_indices_for_role(self):
-            """
-            Devuelve el conjunto de índices de la stack permitidos para el rol actual.
-            - admin: todo
-            - assistant: Estudio, Agenda, Clientes (y subpáginas), Staff (ver/detalle), Reportes
-            - artist: Estudio, Agenda, Clientes (ver/detalle), Staff (ver/detalle), Reportes
-            """
-            u = get_current_user() or {}
-            role = u.get("role", "admin")
-            allowed = {0, self.idx_agenda, self.idx_reportes}
-
-            if role == "admin":
-                allowed |= {
-                    self.idx_clientes, self.idx_cliente_det, self.idx_nuevo_cliente,
-                    self.idx_staff, self.idx_staff_det, self.idx_staff_new,
-                    self.idx_inventory, self.idx_inv_items, self.idx_inv_detail,
-                    self.idx_inv_moves, self.idx_inv_new_item, self.idx_inv_entry, self.idx_inv_adjust,
-                }
-                if hasattr(self, "idx_cash"): allowed.add(self.idx_cash)
-                if hasattr(self, "idx_portafolios"): allowed.add(self.idx_portafolios)
-
-            elif role == "assistant":
-                allowed |= {
-                    self.idx_clientes, self.idx_cliente_det, self.idx_nuevo_cliente,
-                    self.idx_staff, self.idx_staff_det,
-                }
-
-            elif role == "artist":
-                allowed |= {
-                    self.idx_clientes, self.idx_cliente_det,
-                    self.idx_staff, self.idx_staff_det,
-                }
-
-            return allowed
-
+        # Calcula y guarda índices permitidos
+        self._allowed_idx = self._allowed_indices_for_role()
 
     def _is_allowed_index(self, idx: int) -> bool:
         try:
@@ -403,18 +368,15 @@ class MainWindow(QMainWindow):
 
         # Qué botón debe quedar marcado según la página visitada
         mapping = {
-            # Estudio
-            0: self.btn_studio,
+            0: self.btn_studio,                   # Estudio
+            self.idx_agenda: self.btn_sched,     # Agenda
 
-            # Agenda
-            self.idx_agenda: self.btn_sched,
-
-            # Clientes (lista, detalle y nuevo)
+            # Clientes
             self.idx_clientes: self.btn_clients,
             self.idx_cliente_det: self.btn_clients,
             self.idx_nuevo_cliente: self.btn_clients,
 
-            # Staff (lista, detalle y nuevo)
+            # Staff
             self.idx_staff: self.btn_staff,
             self.idx_staff_det: self.btn_staff,
             self.idx_staff_new: self.btn_staff,
@@ -422,94 +384,25 @@ class MainWindow(QMainWindow):
             # Reportes
             self.idx_reportes: self.btn_reports,
 
-            # Inventario (todas sus subpáginas)
+            # Inventario
             self.idx_inventory: self.btn_forms,
             self.idx_inv_items: self.btn_forms,
             self.idx_inv_detail: self.btn_forms,
             self.idx_inv_moves: self.btn_forms,
-           # self.idx_inv_new_item: self.btn_forms,
             self.idx_inv_entry: self.btn_forms,
             self.idx_inv_adjust: self.btn_forms,
         }
 
-        # Desmarcar todas las pills
         for btn in (self.btn_studio, self.btn_sched, self.btn_clients,
                     self.btn_staff, self.btn_reports, self.btn_forms):
             btn.setChecked(False)
 
-        # Marcar la que corresponda
         if idx in mapping:
             mapping[idx].setChecked(True)
 
         self.stack.setCurrentIndex(idx)
 
-    # ====== wiring a fichas (clientes / staff) ======
-    def _open_client_detail(self, client: dict) -> None:
-        self.client_detail.load_client(client)
-        self._ir(self.idx_cliente_det)
-
-    def _open_staff_detail(self, staff: dict) -> None:
-        self.staff_detail.load_staff(staff)
-        self._ir(self.idx_staff_det)
-        self.staff_detail.staff_saved.connect(self._on_staff_saved)
-        self.staff_detail.back_requested.connect(self._back_to_staff_list)
-
-    def _open_staff_portfolio(self, staff: dict) -> None:
-        self.staff_detail.load_staff(staff)
-        self.staff_detail.go_to_portfolio()
-        self._ir(self.idx_staff_det)
-
-    def _on_staff_saved(self):
-        # Refresca la lista de staff y vuelve a la página de listado
-        try:
-            # si tu StaffPage expone este método
-            self.staff_page.reload_from_db()
-        except Exception:
-            # fallback: si el método se llama distinto
-            if hasattr(self.staff_page, "refresh"):
-                self.staff_page.refresh()
-        self._back_to_staff_list()
-        
-    def _open_cash_dialog(self):
-        """
-        Abre la caja rápida (cash register). Si el diálogo no está disponible,
-        cae al placeholder que ya tenías.
-        """
-        # Fallback al placeholder si no se pudo importar
-        if CashRegisterDialog is None:
-            try:
-                return self._ir(self._ensure_cash_page())
-            except Exception:
-                return
-
-        dlg = CashRegisterDialog(self)
-        # modal, mismo “feeling” que los otros popups
-        try:
-            dlg.setModal(True)
-        except Exception:
-            pass
-
-        dlg.exec_()
-
-        # Al cerrar, refresca vistas que dependen de transacciones
-        for refresher in (
-            getattr(self, "reports_page", None),
-            getattr(self, "agenda_page", None),
-        ):
-            try:
-                # usa el método que tengas disponible sin reventar si no existe
-                if hasattr(refresher, "reload_from_db_and_refresh"):
-                    refresher.reload_from_db_and_refresh()
-                elif hasattr(refresher, "refresh_all"):
-                    refresher.refresh_all()
-                elif hasattr(refresher, "refresh"):
-                    refresher.refresh()
-            except Exception:
-                pass
-
-
-
-    # ====== Nuevo cliente como POPUP + refresco inmediato ======
+    # ====== Clientes ======
     def _abrir_nuevo_cliente_popup(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("Nuevo cliente")
@@ -519,7 +412,7 @@ class MainWindow(QMainWindow):
         page.volver_atras.connect(dlg.reject)
         page.cliente_creado.connect(lambda _id: self.clients_page.reload_from_db_and_refresh(keep_page=False))
 
-        lay = QVBoxLayout(dlg)
+        lay = QVBL(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(page)
 
@@ -527,28 +420,73 @@ class MainWindow(QMainWindow):
         dlg.exec_()
 
     def _on_cliente_creado(self, cid: int):
-        # Refresca la tabla de clientes sin perder la página actual
         try:
             self.clients_page.reload_from_db_and_refresh(keep_page=True)
         except Exception:
             pass
         self._ir(self.idx_clientes)
 
-    # ====== refrescos de Clientes ======
     def _show_clients_and_refresh(self):
         self._refresh_clients_table()
         self._ir(self.idx_clientes)
 
     def _refresh_clients_table(self):
         try:
-            # Método implementado en ClientsPage para recargar datos desde BD
             self.clients_page.reload_from_db_and_refresh(keep_page=True)
         except Exception:
             pass
 
-    # Cambio de usuario (desde PanelUsuario)
+    # ====== Staff ======
+    def _open_staff_create(self):
+        self.staff_detail.start_create_mode()
+        self._ir(self.idx_staff_det)
+
+    def _open_staff_detail(self, staff: dict):
+        self.staff_detail.load_staff(staff)
+        self._ir(self.idx_staff_det)
+
+    def _back_to_staff_list(self):
+        self._refresh_staff_list()
+        self._ir(self.idx_staff)
+
+    def _refresh_staff_list(self):
+        try:
+            self.staff_page.reload_from_db_and_refresh()
+        except Exception:
+            pass
+
+    # ====== Caja ======
+    def _open_cash_dialog(self):
+        if CashRegisterDialog is None:
+            try:
+                return self._ir(self._ensure_cash_page())
+            except Exception:
+                return
+
+        dlg = CashRegisterDialog(self)
+        try:
+            dlg.setModal(True)
+        except Exception:
+            pass
+
+        dlg.exec_()
+
+        # Refrescar vistas afectadas por transacciones
+        for refresher in (getattr(self, "reports_page", None),
+                          getattr(self, "agenda_page", None)):
+            try:
+                if hasattr(refresher, "reload_from_db_and_refresh"):
+                    refresher.reload_from_db_and_refresh()
+                elif hasattr(refresher, "refresh_all"):
+                    refresher.refresh_all()
+                elif hasattr(refresher, "refresh"):
+                    refresher.refresh()
+            except Exception:
+                pass
+
+    # ====== Usuario ======
     def _switch_user(self):
-        self.btn_user.setChecked(False)  # oculta panel
+        self.btn_user.setChecked(False)
         dlg = LoginDialog(self)
         if dlg.exec_() == QDialog.Accepted and dlg.user:
             set_current_user(dlg.user)
@@ -557,11 +495,9 @@ class MainWindow(QMainWindow):
             except Exception:
                 self.btn_user.setText("Usuario")
             self._apply_role_gates()
-            # Si la página actual deja de ser válida, llévalo a Estudio
             if not self._is_allowed_index(self.stack.currentIndex()):
                 self._ir(0)
 
-    # Cerrar popup de usuario si clicas fuera
     def _toggle_user_panel(self, checked: bool) -> None:
         if checked:
             self.user_panel.adjustSize()
@@ -572,81 +508,80 @@ class MainWindow(QMainWindow):
             self.user_panel.show()
         else:
             self.user_panel.hide()
-# ====== Staff: helpers de navegación/refresco ======
-    def _open_staff_create(self):
-        """Abrir StaffDetail en modo 'nuevo usuario'."""
-        self.staff_detail.start_create_mode()
-        self._ir(self.idx_staff_det)
-
-    def _open_staff_detail(self, staff: dict):
-        """Abrir StaffDetail cargando desde BD el usuario elegido."""
-        self.staff_detail.load_staff(staff)
-        self._ir(self.idx_staff_det)
-
-    def _back_to_staff_list(self):
-        """Volver a la lista de Staff refrescándola."""
-        self._refresh_staff_list()
-        self._ir(self.idx_staff)
-
-    def _refresh_staff_list(self):
-        """Recarga StaffPage desde BD (seguro ante errores)."""
-        try:
-            self.staff_page.reload_from_db_and_refresh()
-        except Exception:
-            pass
 
     def mousePressEvent(self, event):
         if self.user_panel.isVisible() and not self.user_panel.geometry().contains(event.globalPos()):
             self.user_panel.hide()
             self.btn_user.setChecked(False)
         super().mousePressEvent(event)
-    
-  
-    def _on_item_creado(self, sku):
-     print(f"✅ Nuevo ítem creado con SKU: {sku}")
-    # Aquí podrías recargar una tabla, refrescar datos, etc.
-   
-     self.inventory_items._seed_mock();
-     self.inventory_items._refresh()
-     self.inventory_dash.refrescar_datos();
+
+    # ====== Inventario: popup y refrescos ======
+    def _on_item_creado(self, sku: str):
+        """Refresca Inventario tras crear un ítem."""
+        try:
+            if hasattr(self.inventory_items, "reload_from_db_and_refresh"):
+                self.inventory_items.reload_from_db_and_refresh()
+            elif hasattr(self.inventory_items, "refresh"):
+                self.inventory_items.refresh()
+            elif hasattr(self.inventory_items, "_refresh"):
+                self.inventory_items._refresh()
+        except Exception:
+            pass
+
+        # Dashboard (si expone refresco)
+        try:
+            if hasattr(self.inventory_dash, "refrescar_datos"):
+                self.inventory_dash.refrescar_datos()
+        except Exception:
+            pass
+
+        # Vuelve a la lista de ítems
+        self._ir(self.idx_inv_items)
 
     def _abrir_popup_nuevo_item(self):
-    # Crear diálogo modal
-     dialog = QDialog(self)
-     dialog.setWindowTitle("Nuevo item")
-     dialog.setModal(True)  # bloquea la ventana principal
+        """Popup frameless, translúcido y arrastrable para 'Nuevo ítem'."""
+        dlg = FramelessPopup(self)
+        dlg.setObjectName("NewItemDlg")
+        dlg.setModal(True)
+        dlg.setAttribute(Qt.WA_TranslucentBackground, True)
+        dlg.resize(860, 720)
 
-    # Agregar el formulario dentro del diálogo
-     layout = QVBoxLayout(dialog)
-     form = NewItemPage()
-     layout.addWidget(form)
-     form.item_creado.connect(self._on_item_creado)
-    # Cuando se cierre el formulario (por el botón "Cancelar" o al guardar)
-    # cerramos también el QDialog
-     form.btn_guardar.clicked.connect(dialog.accept)
-     form.btn_cancelar.clicked.connect(dialog.reject)
-     
-    # Mostrar el popup
-     dialog.exec_()
+        outer = QVBL(dlg)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-    def _abrir_entrada_producto(self, item_dict):
-      """
-      Abre el diálogo de entrada de producto como un popup modal
-      y actualiza la tabla cuando se guarda.
-       """
-    # Convertir el diccionario en objeto Product temporal
-      producto = Product(
-        sku=item_dict["sku"],
-        name=item_dict["nombre"],
-        category=item_dict["categoria"],
-        unidad=item_dict["unidad"],
-        stock=item_dict["stock"],
-        min_stock=item_dict["minimo"],
-        caduca=item_dict["caduca"],
-        provedor=item_dict["proveedor"],
-        activo=item_dict["activo"]
-    )
+        from PyQt5.QtWidgets import QGraphicsDropShadowEffect
+        from PyQt5.QtGui import QColor
 
-      dialog = EntradaProductoDialog(producto)
-     # dialog.entrada_creada.connect(self._on_entrada_creada)
-      dialog.exec_()
+        panel = QFrame(dlg)
+        panel.setObjectName("PopupPanel")
+        panel_lay = QVBL(panel)
+        panel_lay.setContentsMargins(24, 24, 24, 24)
+        panel_lay.setSpacing(0)
+
+        form = NewItemPage(panel)
+        panel_lay.addWidget(form)
+
+        dlg.setStyleSheet("""
+        #NewItemDlg { background: transparent; }
+        #PopupPanel {
+            background: #2A2F34;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 16px;
+        }
+        """)
+        shadow = QGraphicsDropShadowEffect(dlg)
+        shadow.setBlurRadius(32); shadow.setXOffset(0); shadow.setYOffset(8)
+        shadow.setColor(QColor(0, 0, 0, 120))
+        panel.setGraphicsEffect(shadow)
+
+        # Señales
+        try: form.item_creado.connect(self._on_item_creado)
+        except: pass
+        try: form.btn_guardar.clicked.connect(dlg.accept)
+        except: pass
+        try: form.btn_cancelar.clicked.connect(dlg.reject)
+        except: pass
+
+        outer.addWidget(panel)
+        dlg.exec_()
