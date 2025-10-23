@@ -187,7 +187,7 @@ class MainWindow(QMainWindow):
         self.idx_inv_entry    = self.stack.addWidget(make_simple_page("Nueva entrada"))
         self.idx_inv_adjust   = self.stack.addWidget(make_simple_page("Ajuste de inventario"))
         self.inventory_items.nueva_entrada  = self._abrir_entrada_producto
-        self.inventory_items.nuevo_ajuste   = lambda it: self._ir(self.idx_inv_adjust)
+        self.inventory_items.nuevo_ajuste   = self._abrir_ajuste_producto
 
         self.inventory_detail.volver.connect(lambda: self._ir(self.idx_inv_items))
         self.inventory_moves.volver.connect(lambda: self._ir(self.idx_inventory))
@@ -610,3 +610,44 @@ class MainWindow(QMainWindow):
         self.inventory_items._seed_mock()
         self.inventory_items._refresh()
         self.inventory_dash.refrescar_datos()
+    
+    def _abrir_ajuste_producto(self, item_dict):
+        """
+        Abre el diálogo de ajuste de producto como un popup modal
+        y actualiza la tabla cuando se guarda.
+        """
+        # Convertir el diccionario en objeto Product temporal
+        producto = Product(
+            sku=item_dict["sku"],
+            name=item_dict["nombre"], 
+            category=item_dict["categoria"],
+            unidad=item_dict["unidad"],
+            stock=item_dict["stock"],
+            min_stock=item_dict["minimo"],
+            caduca=item_dict["caduca"],
+            proveedor=item_dict["proveedor"],
+            activo=item_dict["activo"],
+        )
+    
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Ajuste de Inventario") 
+        dialog.setModal(True)
+    
+        # Agregar el formulario dentro del diálogo
+        layout = QVBoxLayout(dialog)
+        from ui.pages.ajuste_producto import AjusteProductoWidget
+        form = AjusteProductoWidget(producto)
+        form.ajuste_realizado.connect(self._on_ajuste_realizado)
+        form.btn_guardar.clicked.connect(dialog.accept)
+        form.btn_cancelar.clicked.connect(dialog.reject)
+        layout.addWidget(form)
+        dialog.exec_()
+    
+    def _on_ajuste_realizado(self, nombre):
+        """Callback cuando se completa un ajuste"""
+        print(f"✅ Ajuste realizado para el producto: {nombre}")
+        # Actualizar las vistas de inventario
+        self.inventory_items._seed_mock()
+        self.inventory_items._refresh()
+        self.inventory_dash.refrescar_datos()
+    
