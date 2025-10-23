@@ -1,14 +1,4 @@
 from __future__ import annotations
-
-# ============================================================
-# clients.py — Lista de clientes (conexión real a BD + RBAC)
-#
-# Optimización:
-# - Menú contextual con NoStatusTipMenu (no limpia el status bar).
-# - Instagram con render_instagram (muestra @ de forma consistente).
-# - Sin cambios de lógica, columnas ni comportamiento.
-# ============================================================
-
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -16,7 +6,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QPoint
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QFrame, QMessageBox, QApplication
+    QFrame, QMessageBox, QApplication, QFileDialog
 )
 
 # DB & modelos
@@ -80,7 +70,7 @@ class ClientsPage(QWidget):
 
         self.btn_export = QPushButton("Exportar CSV")
         self.btn_export.setObjectName("GhostSmall")
-        self.btn_export.setEnabled(False)
+        self.btn_export.setEnabled(True)   # ← habilitado
         self.btn_export.clicked.connect(self._on_export_clicked)
 
         tb.addWidget(self.btn_import)
@@ -369,4 +359,63 @@ class ClientsPage(QWidget):
     def _on_export_clicked(self):
         if not ensure_permission(self, "clients", "export"):
             return
-        QMessageBox.information(self, "Exportar", "Función de exportar aún no implementada.")
+
+        # ¿Exportar vista actual (filtro/orden aplicados) o todos?
+        ask = QMessageBox(self)
+        ask.setWindowTitle("Exportar clientes a CSV")
+        ask.setText("¿Qué deseas exportar?")
+        btn_view = ask.addButton("Vista actual", QMessageBox.AcceptRole)
+        btn_all  = ask.addButton("Todos", QMessageBox.ActionRole)
+        ask.addButton(QMessageBox.Cancel)
+        ask.exec_()
+
+        clicked = ask.clickedButton()
+        if clicked is None or clicked == ask.button(QMessageBox.Cancel):
+            return
+
+        rows = self._filtered if clicked == btn_view else self._all
+        if not rows:
+            QMessageBox.information(self, "Exportar", "No hay registros para exportar.")
+            return
+
+        # Sugerir nombre de archivo
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        suggested = f"clientes_{ts}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Guardar CSV", suggested, "CSV (*.csv)"
+        )
+        if not path:
+            return
+
+        # Escritura CSV (UTF-8 con BOM para Excel)
+        try:
+            import csv
+            def fmt_dt(dt):
+                return dt.strftime("%Y-%m-%d %H:%M") if dt else ""
+
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow([
+                    "ID", "Nombre", "Teléfono", "Email", "Instagram",
+                    "Artista", "Próxima cita", "Última cita", "Fecha de alta", "Estado"
+                ])
+                for c in rows:
+                    w.writerow([
+                        c.get("id", ""),
+                        c.get("nombre", "") or "",
+                        c.get("tel", "") or "",
+                        c.get("email", "") or "",
+                        (render_instagram(str(c.get("ig"))) if c.get("ig") else ""),
+                        c.get("artista", "") or "",
+                        fmt_dt(c.get("_next_session")),
+                        fmt_dt(c.get("_last_session")),
+                        fmt_dt(c.get("_created_at")),
+                        c.get("estado", "") or "",
+                    ])
+
+            QMessageBox.information(
+                self, "Exportar",
+                f"Se exportaron {len(rows)} registros a:\n{path}"
+            )
+        except Exception as ex:
+            QMessageBox.critical(self, "Exportar", f"Error al exportar: {ex}")

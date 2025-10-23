@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import sqlite3
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap
@@ -120,10 +121,11 @@ class MainWindow(QMainWindow):
 
         # Panel de usuario
         self.user_panel = PanelUsuario(self)
-        self.user_panel.cambiar_usuario.connect(self.solicitar_switch_user.emit)
         self.user_panel.cambiar_tema.connect(self._on_toggle_theme)
-        self.solicitar_switch_user.connect(self._switch_user)
-
+        self.user_panel.logout.connect(self._logout)
+        self.user_panel.abrir_ajustes.connect(self._open_settings)
+        self.user_panel.abrir_info.connect(self._open_about)
+        
         # =========================
         #  Stack de páginas
         # =========================
@@ -224,7 +226,7 @@ class MainWindow(QMainWindow):
         # =========================
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage("Ver. 0.2.0 | Último respaldo —")
+        status.showMessage("Ver. 0.2.1 | Último respaldo —")
 
         # =========================
         #  Layout raíz
@@ -239,7 +241,7 @@ class MainWindow(QMainWindow):
         # Tema persistido
         try:
             mode = json.loads(SETTINGS.read_text(encoding="utf-8")).get("theme", "light")
-            self.user_panel.chk_dark.setChecked(mode == "dark")
+            self.user_panel.set_theme(mode == "dark")
         except Exception:
             pass
 
@@ -251,12 +253,11 @@ class MainWindow(QMainWindow):
             self.close()
             return
 
-        set_current_user(dlg.user)  # guardar sesión actual (id, role, artist_id)
-        try:
-            self.btn_user.setText(f"{dlg.user.get('username', 'Usuario')} ({dlg.user.get('role', '-')})")
-        except Exception:
-            self.btn_user.setText("Usuario")
-
+        set_current_user(dlg.user)
+        # Inyecta datos reales al panel (evita “—”)
+        profile = self._merge_user_profile(dlg.user)
+        self.user_panel.set_user(profile, is_dark=self.user_panel.chk_dark.isChecked())
+        self.btn_user.setText(profile.get('username') or profile.get('name') or 'Usuario')
         # Aplica gates de rol (ocultar menús/páginas y fijar páginas permitidas)
         self._apply_role_gates()
         # Asegura que la página inicial sea válida para el rol actual
@@ -492,9 +493,13 @@ class MainWindow(QMainWindow):
         self.btn_user.setChecked(False)
         dlg = LoginDialog(self)
         if dlg.exec_() == QDialog.Accepted and dlg.user:
+            try:
+                self.user_panel.set_user(dlg.user, is_dark=self.user_panel.chk_dark.isChecked())
+            except Exception:
+                pass
             set_current_user(dlg.user)
             try:
-                self.btn_user.setText(f"{dlg.user.get('username', 'Usuario')} ({dlg.user.get('role', '-')})")
+                self.btn_user.setText(dlg.user.get('username') or dlg.user.get('name') or 'Usuario')
             except Exception:
                 self.btn_user.setText("Usuario")
             self._apply_role_gates()
@@ -503,6 +508,12 @@ class MainWindow(QMainWindow):
 
     def _toggle_user_panel(self, checked: bool) -> None:
         if checked:
+            try:
+                from services.contracts import get_current_user
+                profile = self._merge_user_profile(get_current_user() or {})
+                self.user_panel.set_user(profile, is_dark=self.user_panel.chk_dark.isChecked())
+            except Exception:
+                pass
             self.user_panel.adjustSize()
             btn = self.btn_user
             global_pos = btn.mapToGlobal(btn.rect().bottomRight())
@@ -572,8 +583,111 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(panel)
         dlg.exec_()
+    # ====== Panel de Usuario: handlers ======
+    def _open_settings(self):
+        # Cierra el panel y muestra un placeholder de Ajustes (puedes sustituir por tu página real)
+        self.btn_user.setChecked(False)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Ajustes")
+        lay = QVBL(dlg)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.addWidget(QLabel("Ajustes"))
+        dlg.resize(480, 320)
+        dlg.exec_()
 
-#entrada_producto_popup
+    def _open_about(self):
+        # Cierra el panel y muestra un placeholder de Información
+        self.btn_user.setChecked(False)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Información")
+        lay = QVBL(dlg)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.addWidget(QLabel("InkLink OS\nVersión 0.2.1"))
+        dlg.resize(420, 260)
+        dlg.exec_()
+
+    def _merge_user_profile(self, u: dict) -> dict:
+        profile = dict(u or {})
+        uid = profile.get("id")
+        if not uid:
+            return profile
+        try:
+            from data.db.session import SessionLocal
+            from data.models.user import User
+            with SessionLocal() as db:
+                row = db.query(User).get(uid)
+                if row:
+                    profile.setdefault("name", getattr(row, "name", None) or getattr(row, "username", None))
+                    profile.setdefault("username", getattr(row, "username", None) or getattr(row, "name", None))
+                    if getattr(row, "email", None):
+                        profile.setdefault("email", row.email)
+                    if getattr(row, "instagram", None):
+                        profile.setdefault("instagram", row.instagram)
+                    return profile
+        except Exception:
+            pass
+        try:
+            project_root = Path(__file__).resolve().parents[1]
+            candidates = [
+                project_root / "dev.db",                 # C:\TattoStudio\dev.db  (tu caso)
+                Path.cwd() / "dev.db",                   # por si la app corre desde raíz
+                project_root / "data" / "dev.db",        # alternativa
+            ]
+            dbpath = next((p for p in candidates if p.exists()), None)
+            if dbpath:
+                con = sqlite3.connect(str(dbpath))
+                con.row_factory = sqlite3.Row
+                row = con.execute(
+                    "SELECT username, name, email, instagram FROM users WHERE id=?",
+                    (uid,)
+                ).fetchone()
+                con.close()
+                if row:
+                    username = row["username"]
+                    name     = row["name"]
+                    email    = row["email"]
+                    ig       = row["instagram"]
+
+                    profile.setdefault("name", name or username)
+                    profile.setdefault("username", username or name)
+                    if email:
+                        profile.setdefault("email", email)
+                    if ig:
+                        profile.setdefault("instagram", ig)
+        except Exception:
+            pass
+
+        return profile
+        
+    def _logout(self):
+        self.btn_user.setChecked(False)
+        self.user_panel.hide()
+        self.hide()  # efecto cerrar
+
+        dlg = LoginDialog(self)
+        if dlg.exec_() == QDialog.Accepted and dlg.user:
+            set_current_user(dlg.user)
+
+            profile = self._merge_user_profile(dlg.user)
+            try:
+                self.user_panel.set_user(profile, is_dark=self.user_panel.chk_dark.isChecked())
+            except Exception:
+                pass
+            try:
+                self.btn_user.setText(profile.get('username') or profile.get('name') or 'Usuario')
+            except Exception:
+                self.btn_user.setText("Usuario")
+
+            self._apply_role_gates()
+            if not self._is_allowed_index(self.stack.currentIndex()):
+                self._ir(0)
+
+            self.show()  # reabrimos la ventana tras login
+        else:
+            # Si cancelan el login, sí cerramos la app
+            self.close()
+    
+    #entrada_producto_popup
     def _abrir_entrada_producto(self, item_dict):
         """
         Abre el diálogo de entrada de producto como un popup modal
@@ -610,7 +724,7 @@ class MainWindow(QMainWindow):
         self.inventory_items._seed_mock()
         self.inventory_items._refresh()
         self.inventory_dash.refrescar_datos()
-    
+
     def _abrir_ajuste_producto(self, item_dict):
         """
         Abre el diálogo de ajuste de producto como un popup modal
@@ -642,7 +756,7 @@ class MainWindow(QMainWindow):
         form.btn_cancelar.clicked.connect(dialog.reject)
         layout.addWidget(form)
         dialog.exec_()
-    
+
     def _on_ajuste_realizado(self, nombre):
         """Callback cuando se completa un ajuste"""
         print(f"✅ Ajuste realizado para el producto: {nombre}")
@@ -650,4 +764,3 @@ class MainWindow(QMainWindow):
         self.inventory_items._seed_mock()
         self.inventory_items._refresh()
         self.inventory_dash.refrescar_datos()
-    

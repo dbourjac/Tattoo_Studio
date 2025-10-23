@@ -539,16 +539,10 @@ class ReportsPage(QWidget):
     # ---------------- Exportar ----------------
 
     def _refresh_export_enabled(self):
-        # Admin siempre; Artist nunca; Assistant con elevación
-        if self._role == "artist":
+        if self._role in ("admin", "assistant", "artist"):
+            self.btn_export.setEnabled(True)
+        else:
             self.btn_export.setEnabled(False)
-            return
-        if self._role == "admin":
-            self.btn_export.setEnabled(True)
-            return
-        if self._role == "assistant":
-            self.btn_export.setEnabled(True)
-            return
 
     def _ensure_assistant_elevation(self) -> bool:
         """Para assistant: pide código maestro y eleva 5 min."""
@@ -568,30 +562,71 @@ class ReportsPage(QWidget):
 
         elevate_for(self._user.get("id"), minutes=5)
         return True
+    
+    def _suggest_csv_name(self, scope: str = "vista") -> str:
+        q_from, q_to = self._date_range()
+        tag_scope = "vista" if scope == "vista" else "todos"
+        tag_period = {
+            "today": "hoy",
+            "week": "semana",
+            "month": "mes",
+        }.get(self.period, f"{q_from.toString('yyyyMMdd')}-{q_to.toString('yyyyMMdd')}")
+        return f"reportes_{tag_period}_{tag_scope}.csv"
+
 
     def _export_csv(self):
-        if self._role == "artist":
-            QMessageBox.information(self, "Sin permiso", "Tu rol no puede exportar reportes.")
-            return
         if self._role == "assistant" and not self._ensure_assistant_elevation():
             return
 
-        rows = self._query_rows()
+        # ¿Exportar vista (con filtros) o todos (ignorando combos)?
+        ask = QMessageBox(self)
+        ask.setWindowTitle("Exportar CSV")
+        ask.setText("¿Qué deseas exportar?")
+        btn_view = ask.addButton("Vista actual", QMessageBox.AcceptRole)
+        btn_all  = ask.addButton("Todos", QMessageBox.ActionRole)
+        ask.addButton(QMessageBox.Cancel)
+        ask.exec_()
+        clicked = ask.clickedButton()
+        if clicked is None or clicked == ask.button(QMessageBox.Cancel):
+            return
+
+        # Construir dataset según elección
+        if clicked == btn_view:
+            scope = "vista"
+            rows = self._query_rows()  # respeta periodo + combos actuales
+        else:
+            scope = "todos"
+            # Ignora filtros de combos (periodo se mantiene)
+            prev_artist, prev_pay = self.filter_artist, self.filter_payment
+            try:
+                self.filter_artist, self.filter_payment = "Todos", "Todos"
+                rows = self._query_rows()
+            finally:
+                self.filter_artist, self.filter_payment = prev_artist, prev_pay
+
         if not rows:
             QMessageBox.information(self, "Exportar", "No hay datos para exportar.")
             return
 
-        path, ok = QFileDialog.getSaveFileName(self, "Guardar CSV", "reportes.csv", "CSV (*.csv)")
-        if not ok or not path:
+        # Sugerir nombre
+        suggested = self._suggest_csv_name(scope)
+        path, _ = QFileDialog.getSaveFileName(self, "Guardar CSV", suggested, "CSV (*.csv)")
+        if not path:
             return
 
+        # Escritura CSV (UTF-8 con BOM para Excel)
         try:
             import csv
-            with open(path, "w", newline="", encoding="utf-8") as f:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
                 w.writerow(["Fecha", "Cliente", "Monto", "Pago", "Tatuador"])
                 for qd, cli, amt, pay, art, _aid in rows:
+                    # Nota: sin símbolo $ para facilitar import en hojas de cálculo
                     w.writerow([qd.toString("yyyy-MM-dd"), cli, f"{amt:.2f}", pay, art])
-            QMessageBox.information(self, "Exportar", "Archivo CSV exportado correctamente.")
+
+            QMessageBox.information(
+                self, "Exportar",
+                f"Se exportaron {len(rows)} registros a:\n{path}"
+            )
         except Exception as e:
             QMessageBox.critical(self, "Error al exportar", f"No se pudo exportar el CSV.\n\n{e}")
