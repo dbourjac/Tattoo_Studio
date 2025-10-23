@@ -60,7 +60,7 @@ class NewItemPage(QWidget):
         super().__init__(parent)
 
         self.setWindowTitle("Nuevo ítem")
-        self.setMinimumWidth(800)
+        self.setMinimumWidth(805)
         self.setMinimumHeight(1000)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.setObjectName("NewItemPage")
