@@ -1,3 +1,8 @@
 {
-  "theme": "dark"
+  "theme": "dark",
+  "agenda_hours": {
+    "start": "09:00",
+    "end": "23:00",
+    "step": 30
+  }
 }

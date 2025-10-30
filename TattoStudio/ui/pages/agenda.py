@@ -6,22 +6,23 @@ from datetime import datetime, timedelta, time
 import csv
 import os
 from pathlib import Path
+import json
 
-from PyQt5.QtCore import Qt, QDate, QTime, QPoint, pyqtSignal, QTimer, QEvent
-from PyQt5.QtGui import QFontMetrics, QColor, QPainter, QPainterPath, QPixmap, QMouseEvent, QCursor
+from PyQt5.QtCore import Qt, QDate, QTime, QPoint, pyqtSignal, QTimer, QEvent, QLocale, QRectF
+from PyQt5.QtGui import QFontMetrics, QColor, QPainter, QPainterPath, QPixmap, QMouseEvent, QCursor, QIcon, QFont, QTextCharFormat, QPalette
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QDateEdit, QFrame, QCheckBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QLineEdit, QHeaderView, QSizePolicy, QFileDialog,
     QMessageBox, QMenu, QDialog, QFormLayout, QDialogButtonBox, QSpinBox, QCompleter,
-    QPlainTextEdit, QDoubleSpinBox
+    QPlainTextEdit, QDoubleSpinBox, QToolButton, QCalendarWidget, QAbstractItemView, QToolTip, QTableView
 )
 
 # === BD / servicios ===
 from services.sessions import (
     list_sessions, update_session, complete_session, cancel_session, create_session
 )
-# delete_session es opcional: si no existe, lo manejamos abajo
+# delete_session es opcional
 try:
     from services.sessions import delete_session  # type: ignore
 except Exception:
@@ -31,10 +32,10 @@ from data.db.session import SessionLocal
 from data.models.client import Client
 from data.models.artist import Artist as DBArtist
 
-# Permisos centralizados (elevación incluida) + menús con hover
+# Permisos + menús
 from ui.pages.common import ensure_permission, make_styled_menu
 
-# Helpers compartidos (optimización: sin duplicar lógica de colores/menús)
+# Helpers compartidos
 from ui.pages.common import (
     artist_colors_path, load_artist_colors, fallback_color_for, NoStatusTipMenu, ClickAwayDialog
 )
@@ -42,13 +43,52 @@ from ui.pages.common import (
 # ==============================
 #   MODELOS DE UI (DTOs)
 # ==============================
+# -------- Settings helpers (horario de agenda) --------
+def _settings_path() -> Path:
+    candidates = [
+        Path(__file__).resolve().parents[2] / "settings.json",
+        Path(__file__).resolve().parents[1] / "settings.json",
+        Path.cwd() / "settings.json",
+    ]
+    for p in candidates:
+        try:
+            if p.exists():
+                return p
+        except Exception:
+            pass
+    return candidates[0]
+
+def _load_agenda_hours() -> tuple:
+    start_s, end_s, step = "08:00", "21:30", 30
+    try:
+        data = json.loads(_settings_path().read_text(encoding="utf-8"))
+        ah = (data or {}).get("agenda_hours") or {}
+        start_s = str(ah.get("start", start_s))
+        end_s   = str(ah.get("end",   end_s))
+        step    = int(ah.get("step",  step))
+    except Exception:
+        pass
+
+    def _qt(t, fallback):
+        try:
+            h, m = [int(x) for x in t.split(":")]
+            return QTime(h, m)
+        except Exception:
+            return fallback
+
+    qs = _qt(start_s, QTime(8, 0))
+    qe = _qt(end_s or "21:30", QTime(21, 30))
+    if not qe > qs:
+        qe = QTime(min(23, qs.hour() + 1), qs.minute())
+    if step not in (5, 10, 15, 20, 30, 60):
+        step = 30
+    return qs, qe, step
 
 @dataclass
 class Artist:
     id: str
     name: str
     color: str
-
 
 @dataclass
 class Appt:
@@ -62,15 +102,10 @@ class Appt:
     service: str
     status: str
 
-
 # ==============================
 #   COLORES (centralizado)
 # ==============================
 def _artist_color_for(aid: int, idx_fallback: int) -> str:
-    """
-    Obtiene color por ID desde artist_colors.json (vía common.load_artist_colors()),
-    si no existe usa fallback_color_for(idx_fallback) para mantener paleta consistente.
-    """
     try:
         ov = load_artist_colors()
         key = str(int(aid)).lower()
@@ -80,47 +115,103 @@ def _artist_color_for(aid: int, idx_fallback: int) -> str:
         pass
     return fallback_color_for(idx_fallback)
 
+def _state_color_hex(state: str) -> str:
+    m = {
+        "Activa":      "#3FBF8A",
+        "En espera":   "#E0B252",
+        "Completada":  "#67C1E8",
+        "Cancelada":   "#E57373",
+        "No-show":     "#B38AE3",
+    }
+    return m.get(state, "#9AA0A6")
 
 # ==============================
 #   ESTILO POR ESTADO
 # ==============================
-
-def _status_style(bg: str, border_hex: str, state: str) -> str:
-    """
-    Fondo sólido con el color del artista (relleno total) y variación mínima por estado.
-    """
+def _status_style(bg_override: str, artist_hex: str, state: str) -> str:
     def hex_to_rgba(h, a=1.0):
         h = h.lstrip("#")
         r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
         return f"rgba({r},{g},{b},{a})"
 
-    base = border_hex or "#6b7280"
-
-    # Relleno casi pleno; pequeñas variaciones por estado
+    base = artist_hex or "#6b7280"
     if state == "Completada":
-        back = hex_to_rgba(base, 0.95)
+        back = hex_to_rgba(base, 0.92)
     elif state == "Cancelada":
         back = hex_to_rgba(base, 0.55)
     elif state == "En espera":
-        back = hex_to_rgba(base, 0.85)
-    else:  # Activa
-        back = hex_to_rgba(base, 0.98)
+        back = hex_to_rgba(base, 0.82)
+    else:  # Activa / default
+        back = hex_to_rgba(base, 0.96)
 
-    if bg:
-        back = bg
+    if bg_override:
+        back = bg_override
+
+    state_bar = _state_color_hex(state)
 
     return f"""
     QFrame {{
         background: {back};
         border: 1px solid rgba(255,255,255,0.10);
+        border-left: 6px solid {state_bar};
         border-radius: 8px;
-        color: white;
+        color: #f6f7fb;
     }}
     QFrame:hover {{
         background: {hex_to_rgba(base, 1.0)};
     }}
     QLabel {{ background: transparent; }}
     """
+def _surface_color_from(widget, default="#1f242b") -> str:
+    """Toma el color de fondo efectivo del widget; si es claro (blanco/gris) usa default."""
+    try:
+        c = widget.palette().color(QPalette.Window)
+        # luminosidad perceptual
+        lum = (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) / 255.0
+        name = c.name().lower()
+        if name not in ("#ffffff", "#fff") and lum < 0.6:
+            return name
+    except Exception:
+        pass
+    return default
+
+
+class PillHeader(QHeaderView):
+    def __init__(self, orientation, parent=None, bg="#1f242b", fg="#e6eaf0"):
+        super().__init__(orientation, parent)
+        self._bg = QColor(bg)
+        self._fg = QColor(fg)
+        self.setDefaultAlignment(Qt.AlignCenter)
+        self.setHighlightSections(False)
+        self.setSortIndicatorShown(False)
+        self.setSectionsClickable(False)
+        # Fondo transparente para que solo se vean las 'cards'
+        self.setStyleSheet("QHeaderView{background:transparent;border:none;} QHeaderView::section{background:transparent;border:none;}")
+
+    def paintSection(self, painter, rect, logicalIndex):
+        if not rect.isValid():
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        r = QRectF(rect.adjusted(6, 4, -6, -4))
+        path = QPainterPath()
+        path.addRoundedRect(r, 16.0, 16.0)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._bg)
+        painter.drawPath(path)
+
+        txt = str(self.model().headerData(logicalIndex, self.orientation(), Qt.DisplayRole) or "")
+        painter.setPen(self._fg)
+        painter.drawText(r, Qt.AlignCenter, txt)
+
+        painter.restore()
+
+    def setColors(self, bg: str, fg: str = "#e6eaf0"):
+        self._bg = QColor(bg)
+        self._fg = QColor(fg)
+        self.viewport().update()
 
 
 # ==============================
@@ -131,7 +222,6 @@ class _FramelessDialog(QDialog):
         super().__init__(parent)
         self._close_on_outside = close_on_click_outside
 
-        # Sin barra de título; NO DeleteOnClose (evita crash al leer values())
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setModal(True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -140,7 +230,6 @@ class _FramelessDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # “outer” cubre todo el QDialog: esquinas 100% redondeadas (sin triángulos)
         self.outer = QFrame(self)
         self.outer.setObjectName("outer")
         root.addWidget(self.outer)
@@ -160,7 +249,6 @@ class _FramelessDialog(QDialog):
         self.body_l.setSpacing(8)
         wrap.addWidget(self.body)
 
-        # Estilo homogéneo (inputs NO quedan blancos)
         self.setStyleSheet("""
         QDialog { background: transparent; }
         QFrame#outer {
@@ -193,7 +281,6 @@ class _FramelessDialog(QDialog):
         self._drag_pos = None
         self._filter_installed = False
 
-    # Arrastrable
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self._drag_pos = e.globalPos() - self.frameGeometry().topLeft()
@@ -208,7 +295,6 @@ class _FramelessDialog(QDialog):
         self._drag_pos = None
         super().mouseReleaseEvent(e)
 
-    # Click fuera (solo si se activó)
     def showEvent(self, e):
         if self._close_on_outside and not self._filter_installed:
             from PyQt5.QtWidgets import QApplication
@@ -226,15 +312,12 @@ class _FramelessDialog(QDialog):
     def eventFilter(self, obj, ev):
         if self._close_on_outside and ev.type() == QEvent.MouseButtonPress:
             if isinstance(ev, QMouseEvent):
-                # Usa frameGeometry() (coordenadas globales) para detectar fuera
                 if not self.frameGeometry().contains(ev.globalPos()):
                     self.reject()
                     return True
         return super().eventFilter(obj, ev)
 
-
 class NewApptDialog(_FramelessDialog):
-    """Diálogo de nueva cita con autocompletado de clientes."""
     def __init__(self, parent, artists: List[Artist], clients: List[Tuple[int, str]], default_date: QDate):
         super().__init__("Nueva cita", parent)
 
@@ -255,11 +338,9 @@ class NewApptDialog(_FramelessDialog):
         self.cbo_artist = QComboBox()
         for a in artists:
             self.cbo_artist.addItem(a.name, a.id)
-        self.cbo_artist.setCurrentIndex(-1)  # ninguna selección por defecto
+        self.cbo_artist.setCurrentIndex(-1)
         form.addRow("Tatuador:", self.cbo_artist)
 
-
-        # Cliente con combo editable + completer
         self.cb_client = QComboBox()
         self.cb_client.setEditable(True)
         self.cb_client.setInsertPolicy(QComboBox.NoInsert)
@@ -268,7 +349,7 @@ class NewApptDialog(_FramelessDialog):
         completer = QCompleter([n for _, n in clients], self.cb_client)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         self.cb_client.setCompleter(completer)
-        self.cb_client.setCurrentIndex(-1)  # ninguna selección por defecto
+        self.cb_client.setCurrentIndex(-1)
         form.addRow("Cliente:", self.cb_client)
 
         self.ed_service = QPlainTextEdit(); self.ed_service.setPlaceholderText("Servicio / notas")
@@ -333,7 +414,6 @@ class EditApptDialog(_FramelessDialog):
         for a in artists:
             self.cbo_artist.addItem(a.name, a.id)
 
-        # Guarda originales para fallback y preselecciona
         self._orig_artist_id = ap.artist_id
         idx = self.cbo_artist.findData(ap.artist_id)
         if idx < 0:
@@ -355,7 +435,6 @@ class EditApptDialog(_FramelessDialog):
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         self.cb_client.setCompleter(completer)
 
-        # Guarda originales y preselecciona
         self._orig_client_id = ap.client_id
         self._orig_client_name = ap.client_name
 
@@ -363,7 +442,6 @@ class EditApptDialog(_FramelessDialog):
         if idx_c >= 0:
             self.cb_client.setCurrentIndex(idx_c)
         else:
-            # si no está en la lista, muestra el nombre como texto
             self.cb_client.setCurrentText(ap.client_name or "")
 
         form.addRow("Cliente:", self.cb_client)
@@ -382,7 +460,7 @@ class EditApptDialog(_FramelessDialog):
         self.btn_ok = QPushButton("Guardar"); self.btn_ok.setObjectName("okbtn")
         self.btn_cancel.clicked.connect(self.reject); self.btn_ok.clicked.connect(self.accept)
         btns.addStretch(1); btns.addWidget(self.btn_cancel); btns.addWidget(self.btn_ok)
-        self.body_l.addLayout(btns)  # <- Asegúrate que aquí diga 'self.' (no 'dlg.')
+        self.body_l.addLayout(btns)
 
     def values(self) -> dict:
         date = self.dt_date.date()
@@ -413,40 +491,27 @@ class EditApptDialog(_FramelessDialog):
         }
 
 class PaymentDialog(_FramelessDialog):
-    """
-    Diálogo para registrar/editar el pago de una cita.
-    Devuelve un dict con:
-      - amount (float, MXN)
-      - commission_pct (float, 0-100)
-      - commission_amount (float, MXN)
-      - method (str)
-      - note (str)
-    """
     def __init__(self, parent=None, preset: Optional[dict] = None, title="Cobro"):
         super().__init__(title, parent)
         preset = preset or {}
 
         form = QFormLayout(); form.setContentsMargins(0,0,0,0)
 
-        # Monto total
         self.sp_amount = QDoubleSpinBox()
         self.sp_amount.setDecimals(2); self.sp_amount.setRange(0.00, 1_000_000.00)
         self.sp_amount.setSingleStep(50.00)
         self.sp_amount.setValue(float(preset.get("amount", 0.00)))
         form.addRow("Precio:", self.sp_amount)
 
-        # Comisión (%)
         self.sp_comm = QDoubleSpinBox()
         self.sp_comm.setDecimals(2); self.sp_comm.setRange(0.00, 100.00)
         self.sp_comm.setSingleStep(5.00)
         self.sp_comm.setValue(float(preset.get("commission_pct", 0.00)))
         form.addRow("Comisión (%):", self.sp_comm)
 
-        # Comisión calculada (sólo display)
         self.lbl_comm_calc = QLabel("Comisión: $0.00"); self.lbl_comm_calc.setStyleSheet("background:transparent;")
         form.addRow("", self.lbl_comm_calc)
 
-        # Método
         self.cbo_method = QComboBox()
         self.cbo_method.addItems(["Efectivo", "Tarjeta", "Transferencia", "Mixto"])
         if preset.get("method"):
@@ -454,7 +519,6 @@ class PaymentDialog(_FramelessDialog):
             if i >= 0: self.cbo_method.setCurrentIndex(i)
         form.addRow("Método de pago:", self.cbo_method)
 
-        # Nota
         self.ed_note = QPlainTextEdit()
         self.ed_note.setPlaceholderText("Nota / referencia de cobro…")
         self.ed_note.setFixedHeight(70)
@@ -463,7 +527,6 @@ class PaymentDialog(_FramelessDialog):
 
         self.body_l.addLayout(form)
 
-        # Botones
         btns = QHBoxLayout()
         self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("cancelbtn")
         self.btn_ok = QPushButton("OK"); self.btn_ok.setObjectName("okbtn")
@@ -471,7 +534,6 @@ class PaymentDialog(_FramelessDialog):
         btns.addStretch(1); btns.addWidget(self.btn_cancel); btns.addWidget(self.btn_ok)
         self.body_l.addLayout(btns)
 
-        # Recalcular comisión en vivo
         def _recalc():
             amount = float(self.sp_amount.value())
             pct = float(self.sp_comm.value())
@@ -481,25 +543,9 @@ class PaymentDialog(_FramelessDialog):
         self.sp_comm.valueChanged.connect(_recalc)
         _recalc()
 
-    def values(self) -> dict:
-        amount = float(self.sp_amount.value())
-        pct = float(self.sp_comm.value())
-        comm_amount = round(amount * pct / 100.0, 2)
-        return {
-            "amount": amount,
-            "commission_pct": pct,
-            "commission_amount": comm_amount,
-            "method": self.cbo_method.currentText(),
-            "note": (self.ed_note.toPlainText() or "").strip(),
-            # bandera para permitir actualizar si ya hay transacción
-            "update_if_exists": True,
-        }
-
-
 # ==============================
 #   CHIP DE CITA (click/hover/menu)
 # ==============================
-
 class ApptChip(QFrame):
     def __init__(self, ap: Appt, artist: Optional[Artist], controller: 'AgendaPage'):
         super().__init__()
@@ -508,27 +554,287 @@ class ApptChip(QFrame):
         self.artist = artist
         self.controller = controller
 
-        lay = QVBoxLayout(self); lay.setContentsMargins(6, 4, 6, 4); lay.setSpacing(2)
-        text = f"{ap.client_name}\n{ap.service} • {ap.start.toString('hh:mm')}"
-        lbl = QLabel(text); lbl.setWordWrap(True); lbl.setToolTip(text); lay.addWidget(lbl)
+        lay = QVBoxLayout(self); lay.setContentsMargins(8, 6, 8, 6); lay.setSpacing(2)
+
+        title = QLabel(f"{ap.client_name}")
+        title.setStyleSheet("font-weight:600;")
+        subtitle = QLabel(f"{ap.service} • {ap.start.toString('hh:mm')}")
+        subtitle.setStyleSheet("color: rgba(255,255,255,0.85); font-size:12px;")
+
+        for lbl in (title, subtitle):
+            lbl.setWordWrap(True); lbl.setToolTip(lbl.text())
+            lay.addWidget(lbl)
 
         color = artist.color if artist else "#666"
         self.setStyleSheet(_status_style("", color, ap.status))
 
-    # Click izquierdo = abrir detalle
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:
             self.controller._open_appt_detail(self.ap)
         super().mouseReleaseEvent(e)
 
-    # Menú contextual
     def contextMenuEvent(self, e):
         self.controller._show_appt_context_menu(self.ap, self.mapToGlobal(e.pos()))
-
 
 # ==============================
 #   AGENDA PAGE
 # ==============================
+class MiniCalendar(QCalendarWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setLocale(QLocale(QLocale.Spanish, QLocale.Mexico))
+        self.setGridVisible(False)
+        self.setFirstDayOfWeek(Qt.Sunday)
+        try:
+            self.setHorizontalHeaderFormat(QCalendarWidget.SingleLetterDayNames)
+        except Exception:
+            self.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
+        self.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+
+        self.setMouseTracking(True)
+        self._hover_pos = QPoint(-1, -1)
+        view = self.findChild(QTableView, "qt_calendar_calendarview")
+        if view:
+            view.viewport().installEventFilter(self)
+            view.viewport().setMouseTracking(True)
+            view.setStyleSheet(
+                "QTableView{background:transparent;border:none;}"
+                "QTableView::viewport{background:transparent;border:none;}"
+            )
+        view.setFrameShape(QFrame.NoFrame)
+        view.setShowGrid(False)
+
+        if view.horizontalHeader():
+            hh = view.horizontalHeader()
+            hh.setSectionResizeMode(QHeaderView.Stretch)
+            hh.setMinimumSectionSize(0)
+            hh.setDefaultSectionSize(22)
+            hf = hh.font()
+            hf.setCapitalization(QFont.AllUppercase)
+            hf.setPointSizeF(9.0)
+            hh.setFont(hf)
+            hh.setDefaultAlignment(Qt.AlignCenter)
+            hh.setAutoFillBackground(False)
+            try:
+                hh.viewport().setAutoFillBackground(False)
+            except Exception:
+                pass
+            p = hh.parentWidget()
+            if p:
+                p.setStyleSheet("background:transparent;border:none;")
+            hh.setStyleSheet(
+                "QHeaderView{background:transparent;border:none;}"
+                "QHeaderView::section{"
+                " background:transparent;"
+                " background-color: transparent;"
+                " border:none;"
+                " color:#c7cbd1;"
+                " font-weight:700;"
+                " padding:2px 0;"
+                " margin:0;"
+                " text-align:center;"
+                "}"
+            )
+        if view.verticalHeader():
+            vh = view.verticalHeader()
+            vh.setSectionResizeMode(QHeaderView.Stretch)
+            vh.setMinimumSectionSize(18)
+            vh.setDefaultSectionSize(18)
+
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor("#e6eaf0"))
+        self.setWeekdayTextFormat(Qt.Saturday, fmt)
+        self.setWeekdayTextFormat(Qt.Sunday, fmt)
+
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setFixedHeight(372)
+
+        prev = self.findChild(QToolButton, "qt_calendar_prevmonth")
+        nextb = self.findChild(QToolButton, "qt_calendar_nextmonth")
+        for btn, txt in ((prev, "‹"), (nextb, "›")):
+            if btn:
+                btn.setIcon(QIcon())
+                btn.setText(txt)
+                btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.setMinimumSize(30, 30)
+                btn.setFixedSize(30, 30)
+        self._mb = self.findChild(QToolButton, "qt_calendar_monthbutton")
+        self._yb = self.findChild(QToolButton, "qt_calendar_yearbutton")
+        for b in (self._mb, self._yb):
+            if b:
+                b.setCursor(Qt.ArrowCursor)
+                b.setFocusPolicy(Qt.NoFocus)
+                b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                b.setMinimumWidth(0)
+                b.installEventFilter(self)
+            if self._yb:
+                self._yb.hide()
+
+            self.currentPageChanged.connect(lambda y, m: self._update_nav_labels())
+            self._update_nav_labels()
+
+        nav = self.findChild(QWidget, "qt_calendar_navigationbar")
+        if nav and nav.layout():
+            lay = nav.layout()
+            for w in (prev, self._mb, self._yb, nextb):
+                if w:
+                    lay.removeWidget(w)
+            if self._mb: lay.addWidget(self._mb, 0, Qt.AlignLeft)
+            if self._yb: lay.addWidget(self._yb, 0, Qt.AlignLeft)
+            lay.addStretch(1)
+            if prev:  lay.addWidget(prev,  0, Qt.AlignRight)
+            if nextb: lay.addWidget(nextb, 0, Qt.AlignRight)
+
+        self.setStyleSheet("""
+        /* QCalendarWidget base y todo su árbol SIN fondo */
+        QCalendarWidget, 
+        QCalendarWidget * {
+            background: transparent;
+            border: none;
+        }
+        /* Barra de navegación */
+        QCalendarWidget QWidget#qt_calendar_navigationbar {
+            background: transparent;
+            border: none;
+            margin: 8px 8px 4px 8px;
+            padding: 0;
+        }
+        /* Flechas: texto puro y centrado + hover con pill */
+        QCalendarWidget QToolButton#qt_calendar_prevmonth,
+        QCalendarWidget QToolButton#qt_calendar_nextmonth {
+            min-width: 30px;  max-width: 30px;
+            min-height: 30px; max-height: 30px;
+            border: none;
+            background: transparent;
+            color: #e6eaf0;
+            font-weight: 800;
+            font-size: 20px;
+            padding: 0;
+            margin: 0;
+            text-align: center;
+            qproperty-autoRaise: true;
+        }
+        QCalendarWidget QToolButton#qt_calendar_prevmonth:hover,
+        QCalendarWidget QToolButton#qt_calendar_nextmonth:hover {
+            border-radius: 15px;
+            background: rgba(255,255,255,0.10);
+            border: 1px solid rgba(255,255,255,0.18);
+        }
+        /* Título Mes Año (sin indicador de menú) */
+        QCalendarWidget QToolButton#qt_calendar_monthbutton,
+        QCalendarWidget QToolButton#qt_calendar_yearbutton {
+            border: none; 
+            background: transparent; 
+            color: #e6eaf0;
+            font-weight: 700; 
+            font-size: 20px; 
+            padding: 0 6px; 
+            margin: 0 2px; 
+            min-width: 0;
+        }
+        QCalendarWidget QToolButton#qt_calendar_monthbutton::menu-indicator,
+        QCalendarWidget QToolButton#qt_calendar_yearbutton::menu-indicator { 
+            image: none; width: 0px; 
+        }
+        /* Vista de tabla y su header: todo transparente, sin esquinas ni franja */
+        QCalendarWidget QTableView,
+        QCalendarWidget QTableView::viewport,
+        QCalendarWidget QTableView QHeaderView,
+        QCalendarWidget QTableView QHeaderView::section,
+        QCalendarWidget QTableCornerButton::section {
+            background: transparent;
+            background-color: transparent;
+            border: none;
+        }
+        /* Área de celdas (números) */
+        QCalendarWidget QAbstractItemView {
+            background: transparent;
+            color: #e6eaf0;
+            font-size: 8.4px;
+            outline: 0;
+            border: none;
+        }
+    """)
+
+    def wheelEvent(self, e):
+        e.ignore()
+
+    def eventFilter(self, obj, ev):
+        if obj in (getattr(self, "_mb", None), getattr(self, "_yb", None)):
+            if ev.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+                return True
+
+        if ev.type() == QEvent.MouseMove:
+            self._hover_pos = ev.pos()
+            self.updateCells()
+        elif ev.type() in (QEvent.Leave, QEvent.MouseButtonPress):
+            self._hover_pos = QPoint(-1, -1)
+            self.updateCells()
+        elif ev.type() == QEvent.Wheel:
+            return True
+        return super().eventFilter(obj, ev)
+
+    def paintCell(self, painter: QPainter, rect, date: QDate):
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        in_month = (date.month() == self.monthShown() and date.year() == self.yearShown())
+        is_today = (date == QDate.currentDate())
+        is_selected = (date == self.selectedDate())
+
+        f = painter.font()
+        f.setPointSizeF(8.4)
+        painter.setFont(f)
+
+        rside = min(rect.width(), rect.height())
+        d = int(rside * 0.96)
+        circle = rect.adjusted((rect.width()-d)//2, (rect.height()-d)//2,
+                            -(rect.width()-d)//2, -(rect.height()-d)//2)
+
+        # 1) HOY
+        if is_today and in_month:
+            painter.setBrush(QColor(155, 185, 255, 140))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(circle)
+
+        # 2) SELECCIONADO
+        if is_selected:
+            painter.setBrush(QColor(155, 185, 255, 95))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(circle)
+
+        # 3) HOVER
+        hovered = circle.contains(self._hover_pos)
+        if hovered and in_month:
+            painter.setBrush(QColor(255, 255, 255, 38))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(circle)
+
+        if is_selected:
+            pen = QColor("#0e1217")
+        else:
+            pen = QColor("#e6eaf0" if in_month else "#656b73")
+        painter.setPen(pen)
+        painter.drawText(rect, Qt.AlignCenter, str(date.day()))
+
+        painter.restore()
+    
+    def _update_nav_labels(self):
+        if not hasattr(self, "_mb"):
+            return
+        y = self.yearShown()
+        m = self.monthShown()
+        month_name = QDate(y, m, 1).toString("MMMM")
+        if month_name:
+            month_name = month_name[:1].upper() + month_name[1:]
+        self._mb.setText(f"{month_name} {y}")
+
+        f = self._mb.font()
+        f.setPointSizeF(21.0)
+        f.setBold(True)
+        self._mb.setFont(f)
 
 class AgendaPage(QWidget):
     crear_cita = pyqtSignal()
@@ -536,23 +842,19 @@ class AgendaPage(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
-        # Relee artistas y reconstruye sidebar (nuevos y/o colores)
         self._load_artists_from_db()
         self._rebuild_sidebar_artists()
         self._refresh_all()
 
     def _reload_colors_if_changed(self):
         try:
-            # Usamos la misma ruta centralizada de common.py
             p = Path(artist_colors_path())
             mt = p.stat().st_mtime if p.exists() else 0
             if mt != self._colors_mtime:
                 self._colors_mtime = mt
-                # Releer artistas (para aplicar colores) y reconstruir sidebar
                 self._load_artists_from_db()
                 if hasattr(self, "artists_checks_box"):
                     self._rebuild_sidebar_artists()
-                self._rebuild_sidebar_artists()
                 self._refresh_all()
         except Exception:
             pass
@@ -562,7 +864,7 @@ class AgendaPage(QWidget):
 
         # ------- Estado -------
         self.current_date: QDate = QDate.currentDate()
-        self.current_view: str = "day"   # day | week | month | list
+        self.current_view: str = "day"
         self.selected_artist_ids: List[str] = []
         self.selected_status: str = "Todos"
         self.search_text: str = ""
@@ -571,7 +873,12 @@ class AgendaPage(QWidget):
         self.day_end   = QTime(22, 0)
         self.step_min  = 30
 
-        # Datos
+        s, e, step = _load_agenda_hours()
+        self.day_start = s
+        self.day_end   = e
+        self.step_min  = step
+
+
         self.artists: List[Artist] = []
         self.appts: List[Appt] = []
         self._clients_cache: List[Tuple[int, str]] = []
@@ -579,21 +886,27 @@ class AgendaPage(QWidget):
         self._load_artists_from_db()
         self._load_clients_minimal()
 
-        # ------- UI -------
-        root = QVBoxLayout(self)
+
+        root = QHBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(8)
+        root.setSpacing(12)
 
-        root.addWidget(self._build_toolbar())
-
-        split = QSplitter(Qt.Horizontal); split.setChildrenCollapsible(False)
-        root.addWidget(split, stretch=1)
 
         self.sidebar = self._build_sidebar()
-        self.sidebar.setFixedWidth(240)
-        split.addWidget(self.sidebar)
+        self.sidebar.setFixedWidth(260)
+        root.addWidget(self.sidebar)
 
-        self.views_stack = QStackedWidget(); split.addWidget(self.views_stack); split.setSizes([240, 1000])
+        right_wrap = QFrame()
+        right_v = QVBoxLayout(right_wrap)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.setSpacing(8)
+
+        self.toolbar = self._build_toolbar()
+        right_v.addWidget(self.toolbar)
+
+        self.views_stack = QStackedWidget()
+        right_v.addWidget(self.views_stack, 1)
+        root.addWidget(right_wrap, 1)
 
         self.day_view   = DayView(self)
         self.week_view  = WeekView(self)
@@ -605,64 +918,175 @@ class AgendaPage(QWidget):
         self.views_stack.addWidget(self.month_view)
         self.views_stack.addWidget(self.list_view)
 
-        # Menú contextual en la vista Lista
         self.list_view.tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_view.tbl.customContextMenuRequested.connect(self._show_list_context_menu)
         self.list_view.tbl.itemDoubleClicked.connect(self._open_from_list)
+
+        self.sidebar_collapsed = False
+        self._artist_label_cache: Dict[str, str] = {}
+
         self._rebuild_sidebar_artists()
 
         self._refresh_all()
         self._reload_colors_timer = QTimer(self)
-        self._reload_colors_timer.setInterval(3000)  # cada 3s
+        self._reload_colors_timer.setInterval(3000)
         self._reload_colors_timer.timeout.connect(self._reload_colors_if_changed)
         self._reload_colors_timer.start()
         self._colors_mtime = None
+
+    def apply_hours_from_settings(self):
+        s, e, step = _load_agenda_hours()
+        self.day_start, self.day_end, self.step_min = s, e, step
+        self._refresh_all()
+
+    def _on_view_menu(self, txt: str):
+        mapping = {"Día": ("day", 0), "Semana": ("week", 1), "Mes": ("month", 2), "Lista": ("list", 3)}
+        self.current_view, idx = mapping.get(txt, ("day", 0))
+        self.btn_view.setText(f"{txt} ▾")
+        self.views_stack.setCurrentIndex(idx)
+        self._refresh_all()
+
+    def _sync_date_widgets(self):
+        if hasattr(self, "lbl_date"):
+            self.lbl_date.setText(self.current_date.toString("d 'de' MMMM 'de' yyyy"))
+        if hasattr(self, "cal"):
+            self.cal.setSelectedDate(self.current_date)
+
 
     # ---------- Toolbar ----------
     def _build_toolbar(self) -> QWidget:
         wrap = QFrame(); wrap.setObjectName("Toolbar")
         lay = QHBoxLayout(wrap); lay.setContentsMargins(10, 8, 10, 8); lay.setSpacing(8)
 
-        self.btn_today = QPushButton("Hoy"); self.btn_today.setObjectName("Chip")
-        self.btn_prev  = QPushButton("‹");   self.btn_prev.setObjectName("Chip")
-        self.btn_next  = QPushButton("›");   self.btn_next.setObjectName("Chip")
-        for b in (self.btn_today, self.btn_prev, self.btn_next):
-            b.setFixedHeight(36); b.setMinimumWidth(48)
+        self.btn_today = QPushButton("Hoy")
+        self.btn_today.setObjectName("TodayBtn")
+
+        self.btn_prev = QToolButton()
+        self.btn_prev.setObjectName("NavBtn")
+        self.btn_prev.setText("‹")
+        self.btn_prev.setAutoRaise(True)
+        self.btn_prev.setCursor(Qt.PointingHandCursor)
+        self.btn_prev.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.btn_prev.setFixedSize(40, 40)
+
+        self.btn_next = QToolButton()
+        self.btn_next.setObjectName("NavBtn")
+        self.btn_next.setText("›")
+        self.btn_next.setAutoRaise(True)
+        self.btn_next.setCursor(Qt.PointingHandCursor)
+        self.btn_next.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.btn_next.setFixedSize(40, 40)
+
         self.btn_today.clicked.connect(self._go_today)
         self.btn_prev.clicked.connect(self._go_prev)
         self.btn_next.clicked.connect(self._go_next)
-        lay.addWidget(self.btn_today); lay.addWidget(self.btn_prev); lay.addWidget(self.btn_next)
 
-        self.dp = QDateEdit(self.current_date); self.dp.setCalendarPopup(True)
-        self.dp.dateChanged.connect(self._on_date_changed)
-        self.dp.setFixedHeight(36); self.dp.setMinimumWidth(140)
-        lay.addWidget(self.dp)
+        self.btn_today.setFixedHeight(40)
+        self.btn_today.setStyleSheet("border-radius: 20px;")
+        lay.addWidget(self.btn_today)
+        lay.addWidget(self.btn_prev)
+        lay.addWidget(self.btn_next)
 
-        lbl_vista = QLabel("Vista:"); lbl_vista.setStyleSheet("background: transparent;")
-        lay.addSpacing(6); lay.addWidget(lbl_vista)
-        self.cbo_view = QComboBox()
-        self.cbo_view.addItems(["Día", "Semana", "Mes", "Lista"])
-        self.cbo_view.currentTextChanged.connect(self._on_view_changed)
-        self.cbo_view.setFixedHeight(36)
-        self.cbo_view.setMinimumWidth(120)
-        self.cbo_view.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.cbo_view.setStyleSheet("QComboBox{padding-top:2px;padding-bottom:2px;}")
-        lay.addWidget(self.cbo_view)
+        self.lbl_date = QLabel(self.current_date.toString("d 'de' MMMM 'de' yyyy"))
+        self.lbl_date.setObjectName("BigDate")
+        self.lbl_date.setStyleSheet("background:transparent;")
+        lay.addWidget(self.lbl_date)
 
         lay.addStretch(1)
 
-        self.btn_export = QPushButton("Exportar día")
-        self.btn_export.setObjectName("GhostSmall")
-        self.btn_export.clicked.connect(self._export_day_csv)
-        self.btn_export.setFixedHeight(36)
+        self.btn_view = QToolButton()
+        self.btn_view.setObjectName("OutlinePill")
+        self.btn_view.setText("Día ▾")
+        self.btn_view.setPopupMode(QToolButton.InstantPopup)
+        self.btn_view.setCursor(Qt.PointingHandCursor)
+        self.btn_view.setFixedHeight(40)
+
+        menu_view = make_styled_menu(self.btn_view)
+        for label in ("Día", "Semana", "Mes", "Lista"):
+            act = menu_view.addAction(label)
+            act.triggered.connect(lambda _=False, txt=label: self._on_view_menu(txt))
+        self.btn_view.setMenu(menu_view)
+        lay.addWidget(self.btn_view)
+
+        self.btn_export = QToolButton()
+        self.btn_export.setObjectName("OutlinePill")
+        self.btn_export.setText("Exportar ▾")
+        self.btn_export.setPopupMode(QToolButton.InstantPopup)
+        self.btn_export.setCursor(Qt.PointingHandCursor)
+        self.btn_export.setFixedHeight(40)
+
+        m = make_styled_menu(self.btn_export)
+        act_d = m.addAction("Día actual (CSV)")
+        act_s = m.addAction("Semana (CSV)")
+        act_l = m.addAction("Lista (CSV)")
+        act_d.triggered.connect(lambda: self._export_csv("day"))
+        act_s.triggered.connect(lambda: self._export_csv("week"))
+        act_l.triggered.connect(lambda: self._export_csv("list"))
+        self.btn_export.setMenu(m)
         lay.addWidget(self.btn_export)
 
-        self.btn_new = QPushButton("Nueva cita")
-        self.btn_new.setObjectName("CTA")
-        self.btn_new.clicked.connect(self._open_new_appt_dialog)
-        self.btn_new.setFixedHeight(38); self.btn_new.setMinimumWidth(120)
-        lay.addWidget(self.btn_new)
-
+        wrap.setStyleSheet("""
+        /* Hoy: pill más grande */
+        QPushButton#TodayBtn {
+            font-size: 22px;
+            font-weight: 600;
+            padding: 9px 20px;
+            border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 22px;   /* pill */
+            background: transparent;
+            color: #e6eaf0;
+        }
+        QPushButton#TodayBtn:hover {
+            background: rgba(255,255,255,0.08);
+        }
+        /* Flechas tipo mini-calendario — texto más grande y centrado */
+        QToolButton#NavBtn {
+            min-width: 40px;  max-width: 40px;
+            min-height: 40px; max-height: 40px;
+            border: none;
+            background: transparent;
+            color: #e6eaf0;
+            font-weight: 800;
+            font-size: 28px;   /* chevron grande */
+            padding: 0;
+            margin: 0;
+            qproperty-autoRaise: true;
+            text-align: center;
+        }
+        QToolButton#NavBtn:hover {
+            border-radius: 20px;
+            background: rgba(255,255,255,0.10);
+            border: 1px solid rgba(255,255,255,0.18);
+        }
+        /* Fecha grande */
+        QLabel#BigDate {
+            font-size: 22px;
+            font-weight: 700;
+            padding: 0 10px;
+            background: transparent;
+        }
+        /* Botones desplegables con el mismo look “Hoy” / +Nueva cita */
+        QToolButton#OutlinePill {
+            font-size: 18px;
+            font-weight: 600;
+            padding: 8px 18px;
+            border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 20px;    /* igual que +Nueva cita */
+            background: transparent;
+            color: #e6eaf0;
+        }
+        QToolButton#OutlinePill:hover {
+            background: rgba(255,255,255,0.08);
+        }
+        QToolButton#OutlinePill::menu-indicator { image: none; width: 0px; height: 0px; }
+        QToolButton#OutlinePill:hover {
+            background: rgba(255,255,255,0.08);
+        }
+        /* ← elimina la flecha extra del QToolButton, dejando solo la del texto "▾" */
+        QToolButton#OutlinePill::menu-indicator {
+            image: none; width: 0px; height: 0px;
+        }
+        """)
         return wrap
 
     def _build_sidebar(self) -> QWidget:
@@ -674,23 +1098,34 @@ class AgendaPage(QWidget):
             lbl.setStyleSheet("background: transparent; font-weight: 600;")
             return lbl
 
-        # Buscar
-        lay.addWidget(title("Buscar"))
+        # 1) NUEVA CITA
+        self.btn_new_side = QPushButton("+ Nueva cita")
+        self.btn_new_side.setObjectName("CTA")
+        self.btn_new_side.setFixedHeight(40)
+        self.btn_new_side.setStyleSheet("padding: 8px 14px;")
+        self.btn_new_side.clicked.connect(self._open_new_appt_dialog)
+        lay.addWidget(self.btn_new_side)
+
+        # 2) MINICALENDAR
+        self.cal = MiniCalendar(self)
+        self.cal.setSelectedDate(self.current_date)
+        self.cal.clicked.connect(self._on_calendar_clicked)
+        lay.addWidget(self.cal)
+
+        # 3) BUSCAR CLIENTE
         self.search = QLineEdit()
         self.search.setPlaceholderText("Buscar cliente…")
         self.search.textChanged.connect(self._on_filter_changed)
         lay.addWidget(self.search)
 
-        # Tatuadores (checkboxes)
+        # Tatuadores
         lay.addWidget(title("Tatuadores"))
         self.artists_checks_box = QVBoxLayout()
         self.artists_checks_box.setContentsMargins(0, 0, 0, 0)
         self.artists_checks_box.setSpacing(6)
         lay.addLayout(self.artists_checks_box)
 
-        self.artist_checks: Dict[str, QCheckBox] = {}
-
-        # Estado (se crea aquí pero NO disparamos refresh todavía)
+        # Estado
         lay.addWidget(title("Estado"))
         self.cbo_status = QComboBox()
         self.cbo_status.addItems(["Todos", "Activa", "Completada", "Cancelada", "En espera"])
@@ -700,16 +1135,49 @@ class AgendaPage(QWidget):
         lay.addStretch(1)
         return w
 
+    # ---------- Sidebar helpers ----------
+    def _toggle_sidebar(self):
+        self.sidebar_collapsed = not self.sidebar_collapsed
+        if self.sidebar_collapsed:
+            self.sidebar.setFixedWidth(56)
+            for aid, chk in self.artist_checks.items():
+                self._artist_label_cache[aid] = chk.text()
+                chk.setText("")
+                chk.setToolTip(self._artist_label_cache[aid])
+            self.search.setVisible(False)
+            self.cbo_status.setVisible(False)
+            if hasattr(self, "btn_new_side"): self.btn_new_side.setVisible(False)
+            if hasattr(self, "cal"): self.cal.setVisible(False)
+            if hasattr(self, "toolbar_left_spacer"):
+                self.toolbar_left_spacer.setFixedWidth(56)
+        else:
+            self.sidebar.setFixedWidth(240)
+            for aid, chk in self.artist_checks.items():
+                lbl = self._artist_label_cache.get(aid, "")
+                chk.setText(lbl)
+                chk.setToolTip("")
+            self.search.setVisible(True)
+            self.cbo_status.setVisible(True)
+            if hasattr(self, "btn_new_side"): self.btn_new_side.setVisible(True)
+            if hasattr(self, "cal"): self.cal.setVisible(True)
+            if hasattr(self, "toolbar_left_spacer"):
+                self.toolbar_left_spacer.setFixedWidth(240)
+
+    def _select_all_artists(self, value: bool):
+        for chk in self.artist_checks.values():
+            chk.blockSignals(True)
+            chk.setChecked(value)
+            chk.blockSignals(False)
+        self._on_filter_changed()
+
+    def _on_calendar_clicked(self, date: QDate):
+        self.current_date = date
+        self._sync_date_widgets()
+        self._refresh_all()
+
     # ---------- Sidebar ----------
     def _rebuild_sidebar_artists(self):
-        """
-        Reconstruye los checkboxes de 'Tatuadores' preservando la selección
-        cuando sea posible. Llama a este método cada que se recargan artistas/colores.
-        """
-        # Selección previa
         prev_selected = {aid for aid, chk in getattr(self, "artist_checks", {}).items() if chk.isChecked()}
-
-        # Vaciar contenedor
         while self.artists_checks_box.count():
             item = self.artists_checks_box.takeAt(0)
             w = item.widget()
@@ -717,11 +1185,9 @@ class AgendaPage(QWidget):
                 w.deleteLater()
 
         self.artist_checks = {}
-
-        # Crear checkboxes con el color del artista en el indicador
         for a in self.artists:
             chk = QCheckBox(a.name)
-            chk.setChecked((a.id in prev_selected) or (not prev_selected))  # si no había selección previa, marcar todos
+            chk.setChecked((a.id in prev_selected) or (not prev_selected))
             chk.toggled.connect(self._on_filter_changed)
             chk.setStyleSheet(f"""
                 QCheckBox {{ background: transparent; }}
@@ -739,28 +1205,46 @@ class AgendaPage(QWidget):
             self.artist_checks[a.id] = chk
             self.artists_checks_box.addWidget(chk)
 
-        # Reaplicar filtro con el nuevo mapa
+        if self.sidebar_collapsed:
+            for aid, chk in self.artist_checks.items():
+                self._artist_label_cache[aid] = chk.text()
+                chk.setText("")
+                chk.setToolTip(self._artist_label_cache[aid])
+
         self._on_filter_changed()
 
     # ---------- Navegación temporal ----------
-    def _go_today(self): self.current_date = QDate.currentDate(); self.dp.setDate(self.current_date); self._refresh_all()
+    def _go_today(self):
+        self.current_date = QDate.currentDate()
+        self._sync_date_widgets()
+        self._refresh_all()
+
     def _go_prev(self):
         if   self.current_view == "day":   self.current_date = self.current_date.addDays(-1)
         elif self.current_view == "week":  self.current_date = self.current_date.addDays(-7)
         elif self.current_view == "month": self.current_date = self.current_date.addMonths(-1)
         else:                              self.current_date = self.current_date.addDays(-1)
-        self.dp.setDate(self.current_date); self._refresh_all()
+        self._sync_date_widgets()
+        self._refresh_all()
+
     def _go_next(self):
         if   self.current_view == "day":   self.current_date = self.current_date.addDays(1)
         elif self.current_view == "week":  self.current_date = self.current_date.addDays(7)
         elif self.current_view == "month": self.current_date = self.current_date.addMonths(1)
         else:                              self.current_date = self.current_date.addDays(1)
-        self.dp.setDate(self.current_date); self._refresh_all()
-    def _on_date_changed(self, d: QDate): self.current_date = d; self._refresh_all()
+        self._sync_date_widgets()
+        self._refresh_all()
+
+    def _on_date_changed(self, d: QDate):
+        self.current_date = d
+        self._sync_date_widgets()
+        self._refresh_all()
+
     def _on_view_changed(self, txt: str):
         mapping = {"Día": ("day", 0), "Semana": ("week", 1), "Mes": ("month", 2), "Lista": ("list", 3)}
         self.current_view, idx = mapping.get(txt, ("day", 0))
         self.views_stack.setCurrentIndex(idx); self._refresh_all()
+
     def _on_filter_changed(self, *_):
         selected = [aid for aid, chk in self.artist_checks.items() if chk.isChecked()]
         self.selected_artist_ids = selected if len(selected) != len(self.artist_checks) else []
@@ -782,7 +1266,6 @@ class AgendaPage(QWidget):
             self.artists.append(Artist(id=str(aid), name=name, color=color))
 
     def _load_clients_minimal(self):
-        """Cache ligero para autocompletar en 'Nueva cita'."""
         with SessionLocal() as db:
             rows = db.query(Client.id, Client.name).order_by(Client.name.asc()).all()
             self._clients_cache = [(int(cid), nm) for cid, nm in rows]
@@ -797,7 +1280,6 @@ class AgendaPage(QWidget):
             first = QDate(self.current_date.year(), self.current_date.month(), 1)
             last  = first.addMonths(1).addDays(-1)
             return first, last
-        # Lista: amplio
         return self.current_date.addDays(-365), self.current_date.addDays(365)
 
     def _fetch_sessions_from_db(self):
@@ -874,7 +1356,6 @@ class AgendaPage(QWidget):
             return
         val = dlg.values()
 
-        # 1) Exigir tatuador
         if val.get("artist_id") is None:
             QMessageBox.warning(self, "Nueva cita", "Selecciona un tatuador.")
             return
@@ -883,7 +1364,6 @@ class AgendaPage(QWidget):
         if not ensure_permission(self, "agenda", "create", owner_id=owner_id):
             return
 
-        # 2) Exigir cliente de la lista
         if val.get("client_id") is None:
             QMessageBox.warning(self, "Nueva cita", "Selecciona un cliente de la lista.")
             return
@@ -909,9 +1389,17 @@ class AgendaPage(QWidget):
         if not ap: return
         self._open_appt_detail(ap)
 
-    # Detalle
+    def _show_list_context_menu(self, pos):
+        row = self.list_view.tbl.rowAt(pos.y())
+        ap = self._find_appt_by_row(row)
+        if not ap:
+            return
+
+        gpos = self.list_view.tbl.viewport().mapToGlobal(pos)
+        self._show_appt_context_menu(ap, gpos)
+
+
     def _open_appt_detail(self, ap: Appt):
-        # Popup que se cierra al click fuera
         dlg = ClickAwayDialog("Detalle de cita", self)
 
         form = QFormLayout(); form.setContentsMargins(0,0,0,0)
@@ -926,7 +1414,6 @@ class AgendaPage(QWidget):
         form.addRow("Servicio / nota:", notes)
         dlg.body_l.addLayout(form)
 
-        # Botones
         btns = QHBoxLayout()
         b_edit = QPushButton("Editar")
         b_state = QPushButton("Cambiar estado")
@@ -939,7 +1426,6 @@ class AgendaPage(QWidget):
         btns.addWidget(b_close)
         dlg.body_l.addLayout(btns)
 
-        # Acciones
         def do_edit():
             dlg.close()
             self._edit_appt(ap)
@@ -966,7 +1452,6 @@ class AgendaPage(QWidget):
 
         dlg.exec_()
 
-    # Editar
     def _edit_appt(self, ap: Appt, focus_time: bool = False):
         owner_id = int(ap.artist_id)
         if not ensure_permission(self, "agenda", "edit", owner_id=owner_id):
@@ -990,7 +1475,6 @@ class AgendaPage(QWidget):
                 "status": val["status"],
             }
             update_session(int(ap.id), payload)
-            # Ejecutar acción semántica si corresponde
             if val["status"] == "Completada":
                 complete_session(int(ap.id), {})
             elif val["status"] == "Cancelada":
@@ -1000,7 +1484,6 @@ class AgendaPage(QWidget):
             QMessageBox.critical(self, "Agenda", f"No se pudo guardar: {e}")
         self._refresh_all()
 
-    # Estado directo
     def _set_status(self, ap: Appt, status: str):
         owner_id = int(ap.artist_id)
         if not ensure_permission(self, "agenda", "edit", owner_id=owner_id):
@@ -1017,7 +1500,6 @@ class AgendaPage(QWidget):
             QMessageBox.critical(self, "Agenda", f"No se pudo actualizar: {e}")
         self._refresh_all()
 
-    # Menú contextual directo desde chip
     def _show_appt_context_menu(self, ap: Appt, global_pos: QPoint):
         m = make_styled_menu(self)
 
@@ -1047,16 +1529,14 @@ class AgendaPage(QWidget):
         if chosen is act_complete:
             if not ensure_permission(self, "agenda", "complete", owner_id=int(ap.artist_id)):
                 return
-            dlg = PaymentDialog(self)  # puedes pasar 'preset' si luego lees los datos actuales
+            dlg = PaymentDialog(self)
             if dlg.exec_() == QDialog.Accepted:
                 payload = dlg.values()
                 try:
-                    # primer intento normal
                     complete_session(int(ap.id), payload)
                     QMessageBox.information(self, "Cita", "Cobro registrado.")
                 except Exception as e:
                     msg = str(e).lower()
-                    # si ya existía, ofrecemos ACTUALIZAR
                     if "ya tiene transacción" in msg or "already has" in msg:
                         ask = QMessageBox.question(
                             self, "Editar cobro",
@@ -1084,98 +1564,52 @@ class AgendaPage(QWidget):
                 QMessageBox.critical(self, "Agenda", f"No se pudo cancelar: {e}")
             self._refresh_all(); return
         if chosen is act_delete:
-            self._open_appt_detail(ap)  # reutilizamos confirmaciones del detalle
+            self._open_appt_detail(ap)
             return
 
-    def _show_list_context_menu(self, pos: QPoint):
-        row = self.list_view.tbl.rowAt(pos.y())
-        ap = self._find_appt_by_row(row)
-        if not ap: return
-
-        menu = NoStatusTipMenu(self)  # <-- reemplazo de QMenu
-        act_open = menu.addAction("Abrir ficha")
-        menu.addSeparator()
-        act_edit = menu.addAction("Editar (reprogramar)")
-        act_complete = menu.addAction("Completar (cobrar)")
-        act_cancel = menu.addAction("Cancelar")
-        act_noshow = menu.addAction("Marcar no-show")
-        act_block = menu.addAction("Bloqueo/Ausencia (no disponible)"); act_block.setEnabled(False)
-
-        chosen = menu.exec_(self.list_view.tbl.viewport().mapToGlobal(pos))
-        if not chosen:
-            return
-
-        owner_id = int(ap.artist_id)
-
-        if chosen is act_open:
-            self._open_from_list(); return
-
-        if chosen is act_edit:
-            self._edit_appt(ap); return
-
-        if chosen is act_complete:
-            if not ensure_permission(self, "agenda", "complete", owner_id=owner_id):
-                return
-            dlg = PaymentDialog(self)
-            if dlg.exec_() == QDialog.Accepted:
-                payload = dlg.values()
-                try:
-                    complete_session(int(ap.id), payload)
-                    QMessageBox.information(self, "Cita", "Cobro registrado.")
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "ya tiene transacción" in msg or "already has" in msg:
-                        if QMessageBox.question(self, "Editar cobro",
-                            "Esta cita ya tiene transacción.\n¿Actualizarla con los nuevos datos?") == QMessageBox.Yes:
-                            payload["update_if_exists"] = True
-                            try:
-                                complete_session(int(ap.id), payload)
-                                QMessageBox.information(self, "Cita", "Transacción actualizada.")
-                            except Exception as e2:
-                                QMessageBox.critical(self, "Cita", f"No se pudo actualizar: {e2}")
-                    else:
-                        QMessageBox.critical(self, "Cita", f"No se pudo completar: {e}")
-                self._refresh_all()
-            return
-
-        if chosen is act_cancel:
-            if not ensure_permission(self, "agenda", "cancel", owner_id=owner_id):
-                return
-            try:
-                cancel_session(int(ap.id))
-                QMessageBox.information(self, "Cita", "Cita cancelada.")
-            except Exception as e:
-                QMessageBox.critical(self, "Agenda", f"No se pudo cancelar: {e}")
-            self._refresh_all(); return
-
-        if chosen is act_noshow:
-            if not ensure_permission(self, "agenda", "no_show", owner_id=owner_id):
-                return
-            try:
-                cancel_session(int(ap.id), as_no_show=True)
-                QMessageBox.information(self, "Cita", "Cita marcada como no-show.")
-            except Exception as e:
-                QMessageBox.critical(self, "Agenda", f"No se pudo marcar no-show: {e}")
-            self._refresh_all(); return
-
-    def _export_day_csv(self):
+    # -------- Export genérico (día/semana/lista) --------
+    def _export_csv(self, scope: str = "day"):
         if not ensure_permission(self, "agenda", "export"):
             return
-        rows = [a for a in self._filter_appts() if a.date == self.current_date]
-        if not rows:
-            QMessageBox.information(self, "Exportar", "No hay citas en el día seleccionado.")
-            return
 
-        default_name = f"agenda_{self.current_date.toString('yyyyMMdd')}.csv"
-        path, _ = QFileDialog.getSaveFileName(self, "Exportar CSV", os.path.join(os.path.expanduser("~"), default_name), "CSV (*.csv)")
+        rows_all = self._filter_appts()
+
+        if scope == "day":
+            rows = [a for a in rows_all if a.date == self.current_date]
+            if not rows:
+                QMessageBox.information(self, "Exportar", "No hay citas en el día seleccionado.")
+                return
+            default_name = f"agenda_{self.current_date.toString('yyyyMMdd')}.csv"
+
+        elif scope == "week":
+            monday = self.current_date.addDays(-(self.current_date.dayOfWeek()-1))
+            sunday = monday.addDays(6)
+            rows = [a for a in rows_all if monday <= a.date <= sunday]
+            if not rows:
+                QMessageBox.information(self, "Exportar", "No hay citas en la semana seleccionada.")
+                return
+            default_name = f"agenda_semana_{monday.toString('yyyyMMdd')}_{sunday.toString('yyyyMMdd')}.csv"
+
+        else:  # list
+            rows = rows_all
+            if not rows:
+                QMessageBox.information(self, "Exportar", "No hay citas para exportar.")
+                return
+            default_name = f"agenda_lista_{self.current_date.toString('yyyyMMdd')}.csv"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar CSV",
+            os.path.join(os.path.expanduser("~"), default_name),
+            "CSV (*.csv)"
+        )
         if not path:
             return
 
         try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
                 w.writerow(["Fecha", "Hora", "Cliente", "Artista", "Servicio", "Estado"])
-                for ap in rows:
+                for ap in sorted(rows, key=lambda a: (a.date.toJulianDay(), a.start.hour(), a.start.minute())):
                     artist = self._artist_by_id(ap.artist_id)
                     w.writerow([
                         ap.date.toString("dd/MM/yyyy"),
@@ -1192,6 +1626,17 @@ class AgendaPage(QWidget):
     # ---------- Render ----------
     def _refresh_all(self):
         rows = self._filter_appts()
+
+        counts: Dict[str, int] = {}
+        for ap in rows:
+            counts[ap.artist_id] = counts.get(ap.artist_id, 0) + 1
+        for aid, chk in self.artist_checks.items():
+            base = self._artist_label_cache.get(aid, chk.text()) or ""
+            name_only = base if "(" not in base else base.split("(")[0].strip()
+            label = f"{name_only} ({counts.get(aid, 0)})" if not self.sidebar_collapsed else ""
+            if not self.sidebar_collapsed:
+                chk.setText(label)
+            chk.setToolTip(name_only)
 
         self.day_view.configure(
             self.artists, self.current_date, self.day_start, self.day_end, self.step_min,
@@ -1227,61 +1672,167 @@ class DayView(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
         self.subtitle = QLabel(""); self.subtitle.setStyleSheet("color:#888; background: transparent;")
         lay.addWidget(self.subtitle)
+        self.subtitle.setVisible(False)
 
         grid = QHBoxLayout(); grid.setContentsMargins(0, 0, 0, 0); grid.setSpacing(0)
         lay.addLayout(grid)
 
-        # Tabla de horas (columna fija)
         self.tbl_hours = QTableWidget()
-        self.tbl_hours.setFixedWidth(80)
+        self.tbl_hours.setObjectName("HoursGutter")
+        self.tbl_hours.setFixedWidth(86)
+        self.tbl_hours.setMinimumWidth(86)
+        self.tbl_hours.setMaximumWidth(86)
+        self.tbl_hours.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
+        hh_ = self.tbl_hours.horizontalHeader()
+        hh_.setSectionResizeMode(QHeaderView.Fixed)
+        self.tbl_hours.setFixedWidth(98)
+        self.tbl_hours.setMinimumWidth(98)
+        self.tbl_hours.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.tbl_hours.setFrameShape(QFrame.NoFrame)
         self.tbl_hours.verticalHeader().setVisible(False)
-        self.tbl_hours.horizontalHeader().setVisible(True)
+        self.tbl_hours.horizontalHeader().setVisible(False)
         self.tbl_hours.horizontalHeader().setStretchLastSection(True)
         self.tbl_hours.setEditTriggers(self.tbl_hours.NoEditTriggers)
         self.tbl_hours.setSelectionMode(self.tbl_hours.NoSelection)
         self.tbl_hours.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        grid.addWidget(self.tbl_hours)
+        self.tbl_hours.setVerticalScrollMode(self.tbl_hours.ScrollPerPixel)
+        self.hours_wrap = QFrame()
+        self.hours_wrap.setObjectName("HoursWrap")
+        _hours_v = QVBoxLayout(self.hours_wrap)
+        _hours_v.setContentsMargins(0, 0, 0, 0)
+        _hours_v.setSpacing(0)
+
+        self.hours_pad = QWidget(self.hours_wrap)
+        self.hours_pad.setFixedHeight(28) 
+        _hours_v.addWidget(self.hours_pad)
+
+        _hours_v.addWidget(self.tbl_hours, 1)
+        grid.addWidget(self.hours_wrap)
+
+        self.tbl_hours.setShowGrid(False)
+        self.tbl_hours.setStyleSheet("""
+            QTableWidget#HoursGutter { background: transparent; border: none; color:#e6eaf0; font-weight:600; }
+            QTableWidget#HoursGutter::item { border: none; padding-right:6px; }
+            QHeaderView::section { background: transparent; border: none; }
+        """)
+
+        self._hour_ticks = []
+        self._hour_guides = []
+        self._hour_gutter_offset = 22 
 
         # Tabla principal
         self.tbl = QTableWidget()
+        self.tbl.setObjectName("DayGrid")
         self.tbl.verticalHeader().setVisible(False)
-        self.tbl.setEditTriggers(self.tbl.NoEditTriggers); self.tbl.setSelectionMode(self.tbl.NoSelection)
-        self.tbl.setStyleSheet("QHeaderView::section { background: transparent; }")
-        # Scroll en píxeles para poder compensar la línea “ahora”
+        self.tbl.setEditTriggers(self.tbl.NoEditTriggers)
+        self.tbl.setSelectionMode(self.tbl.NoSelection)
+        self.tbl.setShowGrid(False)
+        bg_cards = _surface_color_from(self.parent.sidebar, "#1f242b")
+        hdr_day = PillHeader(Qt.Horizontal, self.tbl, bg=bg_cards, fg="#e6eaf0")
+        self.tbl.setHorizontalHeader(hdr_day)
+        self.tbl.setStyleSheet("""
+            QTableWidget#DayGrid,
+            QTableWidget#DayGrid::viewport { background: transparent; border: none; }
+            QTableCornerButton::section { background: transparent; border: none; }
+            QTableWidget#DayGrid::item,
+            QTableWidget#DayGrid::item:selected { background: transparent; border: none; }
+        """)
+
         self.tbl.setVerticalScrollMode(self.tbl.ScrollPerPixel)
         self.tbl.setHorizontalScrollMode(self.tbl.ScrollPerPixel)
         grid.addWidget(self.tbl, stretch=1)
+        self._col_guides = []
 
-        # Sincroniza scroll vertical: principal => horas
+        self.fade_top = QFrame(self.tbl.viewport())
+        self.fade_top.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(14,18,23,0.75), stop:1 rgba(14,18,23,0));"
+        )
+        self.fade_top.setFixedHeight(18); self.fade_top.hide()
+
+        self.fade_bottom = QFrame(self.tbl.viewport())
+        self.fade_bottom.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:1,x2:0,y2:0,"
+            "stop:0 rgba(14,18,23,0.75), stop:1 rgba(14,18,23,0));"
+        )
+        self.fade_bottom.setFixedHeight(18); self.fade_bottom.hide()
+
+        self.tbl.verticalScrollBar().rangeChanged.connect(
+            lambda mi, ma: self.tbl_hours.verticalScrollBar().setRange(mi, ma)
+        )
+        self.tbl_hours.verticalScrollBar().rangeChanged.connect(
+            lambda mi, ma: self.tbl.verticalScrollBar().setRange(mi, ma)
+        )
+
         self.tbl.verticalScrollBar().valueChanged.connect(self.tbl_hours.verticalScrollBar().setValue)
-        self.tbl.verticalScrollBar().valueChanged.connect(self._update_now_line)
+        self.tbl_hours.verticalScrollBar().valueChanged.connect(self.tbl.verticalScrollBar().setValue)
 
-        # Línea del “ahora”
+        self.tbl.verticalScrollBar().valueChanged.connect(self._update_now_line)
+        self.tbl.verticalScrollBar().valueChanged.connect(lambda _=None: self._reposition_col_guides())
+        self.tbl.verticalScrollBar().valueChanged.connect(lambda _=None: self._update_fades())
+        self.tbl.verticalScrollBar().valueChanged.connect(lambda _=None: self._reposition_hour_ticks())
+        self.tbl.verticalScrollBar().valueChanged.connect(lambda _=None: self._reposition_hour_guides())
+        self.tbl_hours.verticalScrollBar().valueChanged.connect(lambda _=None: self._reposition_hour_ticks())
+        self.tbl_hours.verticalScrollBar().valueChanged.connect(lambda _=None: self._reposition_hour_guides())
+        self.tbl_hours.verticalScrollBar().valueChanged.connect(lambda _=None: self._reposition_col_guides())
+        self.tbl_hours.verticalScrollBar().valueChanged.connect(lambda _=None: self._update_fades())
+
+
         self.now_line_main = QFrame(self.tbl.viewport()); self.now_line_main.setFrameShape(QFrame.HLine)
         self.now_line_main.setStyleSheet("color:#ff6161; background:#ff6161;")
-        self.now_line_main.setFixedHeight(2); self.now_line_main.hide()
+        self.now_line_main.setFixedHeight(3); self.now_line_main.hide()
+
+        self.now_glow_line = QFrame(self.tbl.viewport())
+        self.now_glow_line.setFrameShape(QFrame.HLine)
+        self.now_glow_line.setStyleSheet("background: rgba(255,97,97,0.30);")
+        self.now_glow_line.setFixedHeight(7)
+        self.now_glow_line.hide()
 
         self.now_line_hours = QFrame(self.tbl_hours.viewport()); self.now_line_hours.setFrameShape(QFrame.HLine)
         self.now_line_hours.setStyleSheet("color:#ff6161; background:#ff6161;")
         self.now_line_hours.setFixedHeight(2); self.now_line_hours.hide()
 
-        # Timer para actualizar posición/anchos
+        self.now_dot = QFrame(self.tbl.viewport())
+        self.now_dot.setObjectName("NowDot")
+        self.now_dot.setStyleSheet("#NowDot{background:#ff6161;border-radius:5px;}")
+        self.now_dot.setFixedSize(10, 10)
+        self.now_dot.hide()
+
+        self.hover_line = QFrame(self.tbl.viewport()); self.hover_line.setFrameShape(QFrame.HLine)
+        self.hover_line.setStyleSheet("background: rgba(255,255,255,0.16);")
+        self.hover_line.setFixedHeight(1); self.hover_line.hide()
+        self.tbl.viewport().installEventFilter(self)
+        self.tbl_hours.viewport().installEventFilter(self)
+
         self._timer = QTimer(self); self._timer.setInterval(30_000); self._timer.timeout.connect(self._update_now_line)
         self._timer.start()
 
-        # Escuchar resize para corregir ancho inicial de la línea
         self.tbl.viewport().installEventFilter(self)
         self.tbl_hours.viewport().installEventFilter(self)
 
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.Resize:
             self._update_now_line()
+            self._reposition_hour_ticks()
+            self._reposition_hour_guides()
+            self._reposition_col_guides()
+            self._update_fades()
+        if obj is self.tbl.viewport():
+            if ev.type() == QEvent.MouseMove:
+                y = ev.pos().y()
+                self.hover_line.setFixedWidth(self.tbl.viewport().width())
+                self.hover_line.move(0, y)
+                self.hover_line.show()
+            elif ev.type() in (QEvent.Leave, QEvent.MouseButtonPress):
+                self.hover_line.hide()
         return super().eventFilter(obj, ev)
 
     def configure(self, artists: List[Artist], date: QDate, start: QTime, end: QTime, step: int, artist_ids: List[str]):
         self.artists = artists; self.date = date
         self.day_start, self.day_end, self.step_min = start, end, step
         self.artist_order = artist_ids
+        self._auto_scrolled_date = None
 
     def render(self, appts: List[Appt], artist_lookup):
         self.subtitle.setText(self.date.toString("ddd dd MMM yyyy"))
@@ -1289,13 +1840,14 @@ class DayView(QWidget):
         steps = int(self.day_start.secsTo(self.day_end) / 60 // self.step_min)
         row_height = 32
 
-        # ----- tabla principal primero -----
         self.tbl.clear(); self.tbl.setRowCount(steps); self.tbl.setColumnCount(len(self.artist_order))
         hdr = self.tbl.horizontalHeader()
         fm = QFontMetrics(self.font())
         for c, aid in enumerate(self.artist_order):
             name = self._artist_name(aid)
-            it = QTableWidgetItem(name); it.setToolTip(name)
+            a = artist_lookup(aid)
+            bullet = "● " if a else ""
+            it = QTableWidgetItem(f"{bullet}{name}"); it.setToolTip(name)
             self.tbl.setHorizontalHeaderItem(c, it)
             hdr.setSectionResizeMode(c, QHeaderView.Stretch)
             minw = max(140, fm.horizontalAdvance(name) + 24)
@@ -1303,26 +1855,54 @@ class DayView(QWidget):
         for r in range(steps):
             self.tbl.setRowHeight(r, row_height)
 
-        # ----- tabla horas (con header alineado) -----
         self.tbl_hours.clear(); self.tbl_hours.setRowCount(steps); self.tbl_hours.setColumnCount(1)
-        self.tbl_hours.horizontalHeader().setFixedHeight(self.tbl.horizontalHeader().height())
-        self.tbl_hours.setHorizontalHeaderItem(0, QTableWidgetItem(""))
+        row_h = self.tbl.rowHeight(0) if self.tbl.rowCount() else row_height
+        pad_top = self.tbl.horizontalHeader().height() + int(row_h * 0.56)
+        if hasattr(self, "hours_pad"):
+            self.hours_pad.setFixedHeight(pad_top)
+        self.tbl_hours.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.tbl_hours.setColumnWidth(0, 80)
+
+        sb_day = self.tbl.verticalScrollBar()
+        sb_day.setStyleSheet(f"""
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 12px;
+            margin: {pad_top}px 4px 12px 4px;
+            border: none;
+            border-radius: 6px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: rgba(255,255,255,0.30);
+            border: none;
+            border-radius: 6px;
+            min-height: 48px;
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+        """)
+
         t = QTime(self.day_start)
         for r in range(steps):
-            show = t.toString("hh:mm") if t.minute() == 0 else t.toString("hh:mm")
-            it = QTableWidgetItem(show if t.minute() in (0, 30) else "")
-            if t.minute() == 30:
-                it.setForeground(QColor("#9aa0a6"))  # tono atenuado
+            txt = t.toString("hh:mm") if t.minute() == 0 else ""
+            it = QTableWidgetItem(txt)
             it.setFlags(Qt.ItemIsEnabled)
+            it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.tbl_hours.setItem(r, 0, it)
+            self.tbl_hours.setRowHeight(r, row_height)
             self.tbl_hours.setRowHeight(r, row_height)
             t = t.addSecs(self.step_min * 60)
 
-        # Indicador “ahora”
-        self.now_line_main.hide(); self.now_line_hours.hide()
-        QTimer.singleShot(0, self._update_now_line)  # asegura ancho/posición correctos iniciales
+        self._create_hour_guides(steps)
+        self._clear_col_guides()
+        QTimer.singleShot(0, self._update_fades)
 
-        # Chips de cita
+        self.now_line_main.hide(); self.now_line_hours.hide()
+        QTimer.singleShot(0, self._update_now_line)
+        QTimer.singleShot(0, self._auto_scroll_to_now)
+
+        # Chips
+        any_chip = False
         for ap in appts:
             if ap.date != self.date or ap.artist_id not in self.artist_order: continue
             col = self.artist_order.index(ap.artist_id)
@@ -1333,10 +1913,21 @@ class DayView(QWidget):
             chip = ApptChip(ap, a, self.parent)
             self.tbl.setSpan(row_start, col, row_span, 1)
             self.tbl.setCellWidget(row_start, col, chip)
+            any_chip = True
+
+        # Empty state
+        if hasattr(self, "_empty_state"):
+            self._empty_state.hide()
+        for _lbl in self.findChildren(QLabel):
+            txt = (_lbl.text() or "").lower()
+            if "no hay citas" in txt or "nueva cita" in txt:
+                _lbl.hide()
 
     def _update_now_line(self):
-        """Coloca la línea roja de 'ahora' con precisión de minutos y corrige scroll/anchos."""
-        self.now_line_main.hide(); self.now_line_hours.hide()
+        self.now_line_main.hide()
+        self.now_line_hours.hide()
+        self.now_dot.hide()
+
         if self.date != QDate.currentDate():
             return
 
@@ -1348,25 +1939,208 @@ class DayView(QWidget):
         minutes = self.day_start.secsTo(QTime.currentTime()) / 60.0
         if minutes < 0:
             return
-        # posición en píxeles desde la PRIMERA fila
-        y_full = (minutes / self.step_min) * row_height
-        # compensar scroll (en píxeles porque usamos ScrollPerPixel)
-        scroll_px = float(self.tbl.verticalScrollBar().value())
-        y_view = int(max(1, min(steps * row_height - 1, y_full - scroll_px)))
 
-        self.now_line_main.setFixedWidth(self.tbl.viewport().width())
-        self.now_line_hours.setFixedWidth(self.tbl_hours.viewport().width())
-        self.now_line_main.move(0, y_view)
-        self.now_line_hours.move(0, y_view)
-        self.now_line_main.show(); self.now_line_hours.show()
+        y_full = (minutes / self.step_min) * row_height
+        scroll_px = float(self.tbl.verticalScrollBar().value())
+        y_view = int(y_full - scroll_px)
+
+        view_w = self.tbl.viewport().width()
+        view_h = self.tbl.viewport().height()
+        if y_view < 1 or y_view > view_h - 1:
+            return
+
+        dot_x = 0
+        self.now_dot.move(dot_x, y_view - self.now_dot.height() // 2)
+        self.now_dot.show()
+        self.now_dot.raise_()
+
+        line_left = self.now_dot.x() + self.now_dot.width() // 2
+        self.now_line_main.setFixedWidth(max(1, view_w - line_left))
+        self.now_line_main.move(line_left, y_view)
+        self.now_line_main.show()
+        self.now_line_main.raise_()
+        self.now_glow_line.setFixedWidth(max(1, view_w - line_left))
+        self.now_glow_line.move(line_left, y_view - (self.now_glow_line.height() - self.now_line_main.height()) // 2)
+        self.now_glow_line.show()
+        self.now_glow_line.lower()
+        self.now_line_main.raise_
+        self.now_dot.raise_()
+
+    def _auto_scroll_to_now(self):
+        if self.date != QDate.currentDate():
+            return
+        if self._auto_scrolled_date == self.date:
+            return
+        row_h = self.tbl.rowHeight(0) if self.tbl.rowCount() else 32
+        minutes = self.day_start.secsTo(QTime.currentTime()) / 60.0
+        if minutes < 0:
+            return
+        target_rows = max(0, (minutes - 60) / self.step_min)
+        y_full = target_rows * row_h
+        self.tbl.verticalScrollBar().setValue(int(y_full))
+        self._auto_scrolled_date = self.date
 
     def _artist_name(self, aid: str) -> str:
         for a in self.artists:
             if a.id == aid: return a.name
         return "Artista"
 
+    def _clear_hour_ticks(self):
+        for _, tick in self._hour_ticks:
+            tick.setParent(None)
+            tick.deleteLater()
+        self._hour_ticks.clear()
+
+    def _create_hour_ticks(self, steps: int):
+        self._clear_hour_ticks()
+        t = QTime(self.day_start)
+        for r in range(steps):
+            if t.minute() == 0:
+                tick = QFrame(self.tbl.viewport())
+                tick.setObjectName("HourTick")
+                tick.setFrameShape(QFrame.HLine)
+                tick.setFixedHeight(2)
+                tick.setFixedWidth(14)
+                tick.setStyleSheet("#HourTick { background: rgba(255,255,255,0.22); }")
+                tick.show()
+                self._hour_ticks.append((r, tick))
+            t = t.addSecs(self.step_min * 60)
+        QTimer.singleShot(0, self._reposition_hour_ticks)
+
+    def _reposition_hour_ticks(self):
+        for r, tick in self._hour_ticks:
+            y = self.tbl.rowViewportPosition(r)
+            tick.move(0, y)
+            tick.raise_()
+
+    def _clear_hour_ticks(self):
+        for _, tick in self._hour_ticks:
+            tick.setParent(None)
+            tick.deleteLater()
+        self._hour_ticks.clear()
+
+    def _create_hour_ticks(self, steps: int):
+        self._clear_hour_ticks()
+        t = QTime(self.day_start)
+        for r in range(steps):
+            if t.minute() == 0:
+                tick = QFrame(self.tbl.viewport())
+                tick.setObjectName("HourTick")
+                tick.setFrameShape(QFrame.HLine)
+                tick.setFixedHeight(2)
+                tick.setFixedWidth(14)
+                tick.setStyleSheet("#HourTick { background: rgba(255,255,255,0.22); }")
+                tick.show()
+                self._hour_ticks.append((r, tick))
+            t = t.addSecs(self.step_min * 60)
+        QTimer.singleShot(0, self._reposition_hour_ticks)
+
+    def _reposition_hour_ticks(self):
+        for r, tick in self._hour_ticks:
+            y = self.tbl.rowViewportPosition(r)
+            tick.move(0, y)
+            tick.raise_()
+    
+    def _clear_hour_guides(self):
+        for _, g in self._hour_guides:
+            g.setParent(None)
+            g.deleteLater()
+        self._hour_guides.clear()
+
+    def _create_hour_guides(self, steps: int):
+        self._clear_hour_guides()
+        t = QTime(self.day_start)
+        for r in range(steps):
+            if t.minute() == 0:
+                g = QFrame(self.tbl.viewport())
+                g.setObjectName("HourGuide")
+                g.setFrameShape(QFrame.HLine)
+                g.setFixedHeight(2)
+                g.setStyleSheet("#HourGuide { background: rgba(255,255,255,0.28); }")
+                g.show()
+                self._hour_guides.append((r, g))
+            t = t.addSecs(self.step_min * 60)
+        QTimer.singleShot(0, self._reposition_hour_guides)
+
+    def _reposition_hour_guides(self):
+        vw = self.tbl.viewport().width()
+        for r, g in self._hour_guides:
+            y = self.tbl.rowViewportPosition(r)
+            g.setFixedWidth(vw)
+            g.move(0, y)
+            g.lower()
+    
+    def _clear_col_guides(self):
+        for _, g in self._col_guides:
+            g.setParent(None); g.deleteLater()
+        self._col_guides.clear()
+
+    def _create_col_guides(self):
+        self._clear_col_guides()
+        cols = self.tbl.columnCount()
+        if cols <= 0: return
+        h = self.tbl.viewport().height()
+        for c in range(1, cols):
+            x = self.tbl.columnViewportPosition(c) - 1
+            g = QFrame(self.tbl.viewport())
+            g.setFrameShape(QFrame.VLine)
+            g.setStyleSheet("background: rgba(255,255,255,0.16);")
+            g.setFixedWidth(1); g.setFixedHeight(h)
+            g.move(x, 0); g.show()
+            self._col_guides.append((c, g))
+
+    def _reposition_col_guides(self):
+        vw_h = self.tbl.viewport().height()
+        for c, g in self._col_guides:
+            x = self.tbl.columnViewportPosition(c) - 1
+            g.setFixedHeight(vw_h)
+            g.move(x, 0)
+            g.raise_()
+
+    def _update_fades(self):
+        vw = self.tbl.viewport()
+        if not vw.isVisible(): return
+        w = vw.width()
+        self.fade_top.setFixedWidth(w)
+        self.fade_bottom.setFixedWidth(w)
+        self.fade_top.move(0, 0)
+        self.fade_bottom.move(0, vw.height() - self.fade_bottom.height())
+
+        sb = self.tbl.verticalScrollBar()
+        show_top = sb.value() > 0
+        show_bottom = sb.value() < (sb.maximum() - 1)
+        self.fade_top.setVisible(show_top)
+        self.fade_bottom.setVisible(show_bottom)
 
 class WeekView(QWidget):
+    def _clear_hour_guides(self):
+        for _, g in self._hour_guides:
+            g.setParent(None)
+            g.deleteLater()
+        self._hour_guides.clear()
+
+    def _create_hour_guides(self, steps: int):
+        self._clear_hour_guides()
+        t = QTime(self.day_start)
+        for r in range(steps):
+            if t.minute() == 0:
+                g = QFrame(self.tbl.viewport())
+                g.setObjectName("HourGuideW")
+                g.setFrameShape(QFrame.HLine)
+                g.setFixedHeight(2)
+                g.setStyleSheet("#HourGuideW { background: rgba(255,255,255,0.28); }")
+                g.show()
+                self._hour_guides.append((r, g))
+            t = t.addSecs(self.step_min * 60)
+        QTimer.singleShot(0, self._reposition_hour_guides)
+
+    def _reposition_hour_guides(self):
+        vw = self.tbl.viewport().width()
+        for r, g in self._hour_guides:
+            y = self.tbl.rowViewportPosition(r)
+            g.setFixedWidth(vw)
+            g.move(0, y)
+            g.lower()   # ← siempre debajo de las citas
     def __init__(self, parent: AgendaPage):
         super().__init__(parent)
         self.parent: AgendaPage = parent
@@ -1376,49 +2150,141 @@ class WeekView(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
         self.subtitle = QLabel(""); self.subtitle.setStyleSheet("color:#888; background: transparent;")
         lay.addWidget(self.subtitle)
+        self.subtitle.setVisible(False)
 
         grid = QHBoxLayout(); grid.setContentsMargins(0,0,0,0); grid.setSpacing(0)
         lay.addLayout(grid)
 
         self.tbl_hours = QTableWidget()
-        self.tbl_hours.setFixedWidth(80)
+        self.tbl_hours.setObjectName("HoursGutterW")
+        self.tbl_hours.setFixedWidth(98)
+        self.tbl_hours.setMinimumWidth(98)
+        self.tbl_hours.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
         self.tbl_hours.verticalHeader().setVisible(False)
-        self.tbl_hours.horizontalHeader().setVisible(True)
-        self.tbl_hours.horizontalHeader().setStretchLastSection(True)
-        self.tbl_hours.setEditTriggers(self.tbl_hours.NoEditTriggers); self.tbl_hours.setSelectionMode(self.tbl_hours.NoSelection)
+        self.tbl_hours.horizontalHeader().setVisible(False)
+        self.tbl_hours.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
+
+        self.tbl_hours.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.tbl_hours.setSelectionMode(QTableWidget.NoSelection)
         self.tbl_hours.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        grid.addWidget(self.tbl_hours)
+        self.tbl_hours.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.tbl_hours.setShowGrid(False)
+
+        self.tbl_hours.setStyleSheet("""
+            QTableWidget#HoursGutterW { background: transparent; border: none; color:#e6eaf0; font-weight:600; }
+            QTableWidget#HoursGutterW::item { border: none; padding-right:6px; }
+            QHeaderView::section { background: transparent; border: none; }
+        """)
+
+        self.hours_wrapW = QFrame()
+        _hours_vW = QVBoxLayout(self.hours_wrapW)
+        _hours_vW.setContentsMargins(0, 0, 0, 0)
+        _hours_vW.setSpacing(0)
+
+        self.hours_padW = QWidget(self.hours_wrapW)
+        self.hours_padW.setFixedHeight(28)
+        _hours_vW.addWidget(self.hours_padW)
+
+        _hours_vW.addWidget(self.tbl_hours, 1)
+        grid.addWidget(self.hours_wrapW)
 
         self.tbl = QTableWidget()
+        self.tbl.setObjectName("WeekGrid")
         self.tbl.verticalHeader().setVisible(False)
-        self.tbl.setEditTriggers(self.tbl.NoEditTriggers); self.tbl.setSelectionMode(self.tbl.NoSelection)
-        self.tbl.setStyleSheet("QHeaderView::section { background: transparent; }")
+        self.tbl.setEditTriggers(self.tbl.NoEditTriggers)
+        self.tbl.setSelectionMode(self.tbl.NoSelection)
+        bg_cards = _surface_color_from(self.parent.sidebar, "#1f242b")
+        hdr_week = PillHeader(Qt.Horizontal, self.tbl, bg=bg_cards, fg="#e6eaf0")
+        self.tbl.setHorizontalHeader(hdr_week)
+        self.tbl.setStyleSheet("""
+            QTableWidget#WeekGrid,
+            QTableWidget#WeekGrid::viewport { background: transparent; border: none; }
+            QTableCornerButton::section { background: transparent; border: none; }
+            QTableWidget#WeekGrid::item { background: transparent; border: none; }
+        """)
         self.tbl.setVerticalScrollMode(self.tbl.ScrollPerPixel)
+        self.tbl.setHorizontalScrollMode(self.tbl.ScrollPerPixel)
+        self.tbl.setShowGrid(False)
         grid.addWidget(self.tbl, stretch=1)
 
-        # Sync scroll
+        self.tbl.verticalScrollBar().rangeChanged.connect(
+            lambda mi, ma: self.tbl_hours.verticalScrollBar().setRange(mi, ma)
+        )
+        self.tbl_hours.verticalScrollBar().rangeChanged.connect(
+            lambda mi, ma: self.tbl.verticalScrollBar().setRange(mi, ma)
+        )
         self.tbl.verticalScrollBar().valueChanged.connect(self.tbl_hours.verticalScrollBar().setValue)
+        self.tbl_hours.verticalScrollBar().valueChanged.connect(self.tbl.verticalScrollBar().setValue)
         self.tbl.verticalScrollBar().valueChanged.connect(self._update_now_line)
 
-        # Línea “ahora”
         self.now_line_main = QFrame(self.tbl.viewport()); self.now_line_main.setFrameShape(QFrame.HLine)
         self.now_line_main.setStyleSheet("color:#ff6161; background:#ff6161;")
-        self.now_line_main.setFixedHeight(2); self.now_line_main.hide()
+        self.now_line_main.setFixedHeight(3); self.now_line_main.hide()
 
-        self.now_line_hours = QFrame(self.tbl_hours.viewport()); self.now_line_hours.setFrameShape(QFrame.HLine)
-        self.now_line_hours.setStyleSheet("color:#ff6161; background:#ff6161;")
-        self.now_line_hours.setFixedHeight(2); self.now_line_hours.hide()
+        self.now_line_hours = QFrame(self.tbl_hours.viewport()); self.now_line_hours.hide()
 
-        # Timer y resize
+        self.now_dot = QFrame(self.tbl.viewport())
+        self.now_dot.setObjectName("NowDot")
+        self.now_dot.setStyleSheet("#NowDot{background:#ff6161;border-radius:5px;}")
+        self.now_dot.setFixedSize(10, 10)
+        self.now_dot.hide()
+
+        self.hover_line = QFrame(self.tbl.viewport()); self.hover_line.setFrameShape(QFrame.HLine)
+        self.hover_line.setStyleSheet("background: rgba(255,255,255,0.16);")
+        self.hover_line.setFixedHeight(1); self.hover_line.hide()
+
+        self._hour_ticks = []
+        self._hour_guides = []
+
         self._timer = QTimer(self); self._timer.setInterval(30_000); self._timer.timeout.connect(self._update_now_line)
         self._timer.start()
         self.tbl.viewport().installEventFilter(self)
         self.tbl_hours.viewport().installEventFilter(self)
+        self.tbl.verticalScrollBar().valueChanged.connect(lambda _=None: self._reposition_hour_guides())
+        self.tbl_hours.verticalScrollBar().valueChanged.connect(lambda _=None: self._reposition_hour_guides())
 
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.Resize:
             self._update_now_line()
+            self._reposition_hour_guides()
+        if obj is self.tbl.viewport():
+            if ev.type() == QEvent.MouseMove:
+                y = ev.pos().y()
+                self.hover_line.setFixedWidth(self.tbl.viewport().width())
+                self.hover_line.move(0, y)
+                self.hover_line.show()
+            elif ev.type() in (QEvent.Leave, QEvent.MouseButtonPress):
+                self.hover_line.hide()
         return super().eventFilter(obj, ev)
+
+    def _clear_hour_ticks(self):
+        for _, tick in self._hour_ticks:
+            tick.setParent(None)
+            tick.deleteLater()
+        self._hour_ticks.clear()
+
+    def _create_hour_ticks(self, steps: int):
+        self._clear_hour_ticks()
+        t = QTime(self.day_start)
+        for r in range(steps):
+            if t.minute() == 0:
+                tick = QFrame(self.tbl.viewport())
+                tick.setObjectName("HourTickW")
+                tick.setFrameShape(QFrame.HLine)
+                tick.setFixedHeight(2)
+                tick.setFixedWidth(14)
+                tick.setStyleSheet("#HourTickW { background: rgba(255,255,255,0.22); }")
+                tick.show()
+                self._hour_ticks.append((r, tick))
+            t = t.addSecs(self.step_min * 60)
+        QTimer.singleShot(0, self._reposition_hour_ticks)
+
+    def _reposition_hour_ticks(self):
+        for r, tick in self._hour_ticks:
+            y = self.tbl.rowViewportPosition(r)
+            tick.move(0, y)
+            tick.raise_()
 
     def configure(self, artists: List[Artist], date: QDate, start: QTime, end: QTime, step: int, artist_ids: List[str]):
         self.date = date; self.day_start = start; self.day_end = end; self.step_min = step
@@ -1436,37 +2302,81 @@ class WeekView(QWidget):
         row_height = 32
 
         self.tbl.clear(); self.tbl.setRowCount(steps); self.tbl.setColumnCount(7)
-        self.tbl.setHorizontalHeaderLabels([(monday.addDays(i)).toString("ddd dd") for i in range(7)])
+        labels = []
+        for i in range(7):
+            d = (monday.addDays(i))
+            lab = d.toString("ddd dd")
+            if d == QDate.currentDate(): lab += " • hoy"
+            labels.append(lab)
+        self.tbl.setHorizontalHeaderLabels(labels)
         hdr = self.tbl.horizontalHeader()
         for c in range(7):
             hdr.setSectionResizeMode(c, QHeaderView.Stretch)
-        for r in range(steps): self.tbl.setRowHeight(r, row_height)
+        for r in range(steps): 
+            self.tbl.setRowHeight(r, row_height)
 
-        # Horas con header alineado
         self.tbl_hours.clear(); self.tbl_hours.setRowCount(steps); self.tbl_hours.setColumnCount(1)
-        self.tbl_hours.horizontalHeader().setFixedHeight(self.tbl.horizontalHeader().height())
-        self.tbl_hours.setHorizontalHeaderItem(0, QTableWidgetItem(""))
+        self.tbl_hours.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.tbl_hours.setColumnWidth(0, 80)
+
+        row_h = self.tbl.rowHeight(0) if self.tbl.rowCount() else row_height
+        pad_top = self.tbl.horizontalHeader().height() + int(row_h * 0.56)
+
+        try:
+            self.tbl_hours.viewport().setContentsMargins(0, pad_top, 0, 0)
+        except Exception:
+            pass
+
+        row_h = self.tbl.rowHeight(0) if self.tbl.rowCount() else row_height
+        pad_top = self.tbl.horizontalHeader().height() + int(row_h * 0.56)
+        if hasattr(self, "hours_padW"):
+            self.hours_padW.setFixedHeight(pad_top)
+
+        self.tbl_hours.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.tbl_hours.setColumnWidth(0, 80)
+
+        # Scrollbar vertical en Week: alinear con el área de citas y estilo transparente/redondeado
+        sb_week = self.tbl.verticalScrollBar()
+        sb_week.setStyleSheet(f"""
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 12px;
+            margin: {pad_top}px 4px 12px 4px;   /* solo el área de citas */
+            border: none;
+            border-radius: 6px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: rgba(255,255,255,0.30);
+            border: none;
+            border-radius: 6px;                 /* óvalo real */
+            min-height: 48px;
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+        """)
         t = QTime(self.day_start)
         for r in range(steps):
-            txt = t.toString("hh:mm") if t.minute() in (0, 30) else ""
+            txt = t.toString("hh:mm") if t.minute() == 0 else ""
             it = QTableWidgetItem(txt)
-            if t.minute() == 30:
-                it.setForeground(QColor("#9aa0a6"))
             it.setFlags(Qt.ItemIsEnabled)
+            it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.tbl_hours.setItem(r, 0, it)
             self.tbl_hours.setRowHeight(r, row_height)
             t = t.addSecs(self.step_min * 60)
 
-        # Línea “ahora”
-        self.now_line_main.hide(); self.now_line_hours.hide()
+        self._create_hour_guides(steps)
+        self.now_line_main.hide()
+        self.now_dot.hide()
         QTimer.singleShot(0, self._update_now_line)
 
-        if not self.artist_id: return
+        if not self.artist_id:
+            return
 
-        # Chips
         for ap in appts:
-            if ap.artist_id != self.artist_id: continue
-            if not (monday <= ap.date <= monday.addDays(6)): continue
+            if ap.artist_id != self.artist_id: 
+                continue
+            if not (monday <= ap.date <= monday.addDays(6)): 
+                continue
 
             col = monday.daysTo(ap.date)
             row_start = int(self.day_start.secsTo(ap.start) / 60 // self.step_min)
@@ -1478,33 +2388,58 @@ class WeekView(QWidget):
             self.tbl.setCellWidget(row_start, col, chip)
 
     def _update_now_line(self):
-        self.now_line_main.hide(); self.now_line_hours.hide()
-        if self.date != QDate.currentDate():
+        self.now_line_main.hide()
+        self.now_dot.hide()
+
+        monday = self.date.addDays(-(self.date.dayOfWeek()-1))
+        today = QDate.currentDate()
+        if not (monday <= today <= monday.addDays(6)):
             return
+
         steps = int(self.day_start.secsTo(self.day_end) / 60 // self.step_min)
-        if steps <= 0: return
+        if steps <= 0:
+            return
 
         row_height = self.tbl.rowHeight(0) if self.tbl.rowCount() else 32
         minutes = self.day_start.secsTo(QTime.currentTime()) / 60.0
-        if minutes < 0: return
+        if minutes < 0:
+            return
+
         y_full = (minutes / self.step_min) * row_height
         scroll_px = float(self.tbl.verticalScrollBar().value())
-        y_view = int(max(1, min(steps * row_height - 1, y_full - scroll_px)))
+        y_view = int(y_full - scroll_px)
 
-        self.now_line_main.setFixedWidth(self.tbl.viewport().width())
-        self.now_line_hours.setFixedWidth(self.tbl_hours.viewport().width())
-        self.now_line_main.move(0, y_view)
-        self.now_line_hours.move(0, y_view)
-        self.now_line_main.show(); self.now_line_hours.show()
+        view_h = self.tbl.viewport().height()
+        if y_view < 1 or y_view > view_h - 1:
+            return
 
+        col_today = monday.daysTo(today)   # 0..6
+        if not (0 <= col_today < self.tbl.columnCount()):
+            return
+        x_left = self.tbl.columnViewportPosition(col_today)
+        col_w  = self.tbl.columnWidth(col_today)
+        if col_w <= 0:
+            return
+
+        dot_x = x_left
+        self.now_dot.move(dot_x, y_view - self.now_dot.height() // 2)
+        self.now_dot.show()
+        self.now_dot.raise_()
+
+        line_left = dot_x + self.now_dot.width() // 2
+        line_w = max(1, col_w - (self.now_dot.width() // 2))
+        self.now_line_main.setFixedWidth(line_w)
+        self.now_line_main.move(line_left, y_view)
+        self.now_line_main.show()
+        self.now_line_main.raise_()
 
 class MonthView(QWidget):
-    """Vista Mes con 7 columnas iguales y día actual destacado."""
     def __init__(self, parent: AgendaPage):
         super().__init__(parent)
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
         self.subtitle = QLabel(""); self.subtitle.setStyleSheet("color:#888; background: transparent;")
         lay.addWidget(self.subtitle)
+        self.subtitle.setVisible(False)
 
         self.tbl = QTableWidget(); self.tbl.verticalHeader().setVisible(False); self.tbl.horizontalHeader().setVisible(False)
         self.tbl.setEditTriggers(self.tbl.NoEditTriggers); self.tbl.setSelectionMode(self.tbl.NoSelection)
@@ -1544,19 +2479,23 @@ class MonthView(QWidget):
                 if QDate(y, m, day) == today:
                     lbl_day.setStyleSheet("font-weight:700; padding:2px 6px; border:1px solid rgba(255,255,255,0.2); border-radius:6px;")
 
-                # Chips compactos (máx 4) con barra por artista
-                for ap in byday.get(day, [])[:4]:
+                items = byday.get(day, [])
+                for ap in items[:4]:
                     a = artist_lookup(ap.artist_id); color = a.color if a else "#999"
                     text = f"{ap.start.toString('hh:mm')} · {ap.client_name}"
                     chip = QLabel(text); chip.setToolTip(f"{text}\n{ap.service}")
                     chip.setStyleSheet(f"padding:1px 2px; border-left:4px solid {color};")
                     lay.addWidget(chip)
+                if len(items) > 4:
+                    more = QLabel(f"+{len(items)-4}")
+                    more.setStyleSheet("color:#9aa0a6;")
+                    lay.addWidget(more)
+
                 lay.addStretch(1)
                 self.tbl.setCellWidget(r, c, cell); day += 1
 
 
 class ListView(QWidget):
-    """Vista Lista: todas las citas filtradas (rango amplio)."""
     def __init__(self, parent: AgendaPage):
         super().__init__(parent)
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
@@ -1568,6 +2507,19 @@ class ListView(QWidget):
         self.tbl.setStyleSheet("QHeaderView::section { background: transparent; }")
         lay.addWidget(self.tbl, stretch=1)
 
+    def _pill(self, text: str, bg: str) -> QWidget:
+        w = QLabel(text)
+        w.setStyleSheet(f"padding:2px 8px; border-radius:10px; background:{bg}; color:#0e1217; font-weight:600;")
+        wrap = QWidget(); l = QHBoxLayout(wrap); l.setContentsMargins(0,0,0,0); l.addWidget(w, 0, Qt.AlignLeft)
+        return wrap
+
+    def _artist_cell(self, name: str, color: str) -> QWidget:
+        dot = QLabel("●"); dot.setStyleSheet(f"color:{color}; padding-right:6px;")
+        lbl = QLabel(name); lbl.setStyleSheet("background:transparent;")
+        w = QWidget(); l = QHBoxLayout(w); l.setContentsMargins(0,0,0,0)
+        l.addWidget(dot); l.addWidget(lbl); l.addStretch(1)
+        return w
+
     def render(self, appts: List[Appt], artist_lookup):
         self.tbl.setRowCount(0)
         rows = sorted(appts, key=lambda a: (a.date.toJulianDay(), a.start.hour(), a.start.minute()))
@@ -1577,8 +2529,9 @@ class ListView(QWidget):
             self.tbl.setItem(row, 0, QTableWidgetItem(ap.date.toString("dd/MM/yyyy")))
             self.tbl.setItem(row, 1, QTableWidgetItem(ap.start.toString("hh:mm")))
             self.tbl.setItem(row, 2, QTableWidgetItem(ap.client_name))
-            self.tbl.setItem(row, 3, QTableWidgetItem(artist.name if artist else ""))
+            self.tbl.setCellWidget(row, 3, self._artist_cell(artist.name if artist else "", artist.color if artist else "#999"))
             it_srv = QTableWidgetItem(ap.service or "")
             it_srv.setToolTip(ap.service or "")
             self.tbl.setItem(row, 4, it_srv)
-            self.tbl.setItem(row, 5, QTableWidgetItem(ap.status))
+            pill = self._pill(ap.status, _state_color_hex(ap.status))
+            self.tbl.setCellWidget(row, 5, pill)

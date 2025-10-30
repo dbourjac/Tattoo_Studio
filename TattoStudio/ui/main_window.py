@@ -6,7 +6,8 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton,
-    QFrame, QStatusBar, QStackedWidget, QSizePolicy, QDialog, QVBoxLayout as QVBL
+    QFrame, QStatusBar, QStackedWidget, QSizePolicy, QDialog, QVBoxLayout as QVBL,
+    QFormLayout, QDialogButtonBox, QComboBox, QTimeEdit
 )
 
 from ui.widgets.user_panel import PanelUsuario
@@ -226,7 +227,7 @@ class MainWindow(QMainWindow):
         # =========================
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage("Ver. 0.2.1 | Último respaldo —")
+        status.showMessage("Ver. 0.2.2 | Último respaldo —")
 
         # =========================
         #  Layout raíz
@@ -585,14 +586,76 @@ class MainWindow(QMainWindow):
         dlg.exec_()
     # ====== Panel de Usuario: handlers ======
     def _open_settings(self):
-        # Cierra el panel y muestra un placeholder de Ajustes (puedes sustituir por tu página real)
         self.btn_user.setChecked(False)
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Ajustes")
-        lay = QVBL(dlg)
-        lay.setContentsMargins(20, 20, 20, 20)
-        lay.addWidget(QLabel("Ajustes"))
-        dlg.resize(480, 320)
+        try:
+            import json
+            data = json.loads(SETTINGS.read_text(encoding="utf-8")) if SETTINGS.exists() else {}
+            ah = (data or {}).get("agenda_hours") or {}
+            cur_start = str(ah.get("start") or self.agenda_page.day_start.toString("HH:mm"))
+            cur_end   = str(ah.get("end")   or self.agenda_page.day_end.toString("HH:mm"))
+            cur_step  = int(ah.get("step")  or self.agenda_page.step_min)
+        except Exception:
+            cur_start = self.agenda_page.day_start.toString("HH:mm")
+            cur_end   = self.agenda_page.day_end.toString("HH:mm")
+            cur_step  = self.agenda_page.step_min
+
+        # Diálogo
+        dlg = QDialog(self); dlg.setWindowTitle("Ajustes")
+        dlg.resize(520, 240)
+        outer = QVBL(dlg); outer.setContentsMargins(20, 20, 20, 20); outer.setSpacing(14)
+        outer.addWidget(QLabel("Ajustes de agenda"))
+
+        form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0); form.setSpacing(10)
+
+        te_start = QTimeEdit(); te_start.setDisplayFormat("HH:mm")
+        te_end   = QTimeEdit(); te_end.setDisplayFormat("HH:mm")
+        try:
+            h, m = [int(x) for x in cur_start.split(":")]; te_start.setTime(te_start.time().fromString(cur_start, "HH:mm"))
+        except Exception:
+            te_start.setTime(te_start.time().fromString("08:00", "HH:mm"))
+        try:
+            te_end.setTime(te_end.time().fromString(cur_end, "HH:mm"))
+        except Exception:
+            te_end.setTime(te_end.time().fromString("21:30", "HH:mm"))
+
+        cb_step = QComboBox(); cb_step.addItems(["5","10","15","20","30","60"])
+        idx = cb_step.findText(str(cur_step)); cb_step.setCurrentIndex(idx if idx >= 0 else cb_step.findText("30"))
+
+        form.addRow("Inicio del día:", te_start)
+        form.addRow("Fin del día:",    te_end)
+        form.addRow("Paso (min):",     cb_step)
+        outer.addLayout(form)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        outer.addWidget(btns)
+
+        def _save():
+            s = te_start.time(); e = te_end.time()
+            if not e > s:
+                # Normaliza: fin = inicio + 1h si el usuario pone algo inválido
+                from PyQt5.QtCore import QTime
+                e = QTime(min(23, s.hour()+1), s.minute())
+            payload = {
+                "start": s.toString("HH:mm"),
+                "end":   e.toString("HH:mm"),
+                "step":  int(cb_step.currentText()),
+            }
+            try:
+                import json
+                data = json.loads(SETTINGS.read_text(encoding="utf-8")) if SETTINGS.exists() else {}
+                data["agenda_hours"] = payload
+                SETTINGS.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            # Notificar/agregar en vivo a la Agenda
+            try:
+                self.agenda_page.apply_hours_from_settings()
+            except Exception:
+                pass
+            dlg.accept()
+
+        btns.accepted.connect(_save)
+        btns.rejected.connect(dlg.reject)
         dlg.exec_()
 
     def _open_about(self):
@@ -602,7 +665,7 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("Información")
         lay = QVBL(dlg)
         lay.setContentsMargins(20, 20, 20, 20)
-        lay.addWidget(QLabel("InkLink OS\nVersión 0.2.1"))
+        lay.addWidget(QLabel("InkLink OS\nVersión 0.2.2"))
         dlg.resize(420, 260)
         dlg.exec_()
 
